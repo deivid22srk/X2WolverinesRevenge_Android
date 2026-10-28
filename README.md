@@ -37,9 +37,10 @@ Repositório alvo do gerado (`gen/`): **privado** (`deivid22srk/X2WR_gen`) → o
 | Áudio (DirectSound + winmm) | ❌ Não implementado | Gancho definido, sem saída real |
 | Decodificação de vídeo Bink | ❌ Não implementado | 15 exports existem como máquina de estados |
 | PKR3 container | ⚠️ Parcial | Índice lido; mapeamento offset→arquivo pendente |
-| APK compilado no CI | ⏳ A executar | Nasce apenas no GitHub Actions |
+| APK compilado no CI | ✅ **Feito** | run [40737389260](https://github.com/deivid22srk/X2WolverinesRevenge_Android/actions/runs/40737389260) — `app-debug.apk` 14.077.625 B, `libx2wr.so` 24.647.744 B, ELF AArch64 (`e_machine=183`) |
 | Jogo executa o CRT | 🔶 **Parcial** | Entrypoint executa (HeapCreate/GetVersionExA chamados) e para em `VA 0x005c40ae` — bloqueador em docs/TESTED.md §2.8 |
 | Jogo chega ao menu principal | ❌ **Não** | Critério de aceitação **não atingido** |
+| APK instalado / executado | ❌ Não testado | Não há dispositivo aqui; o artefato foi inspecionado por dentro, não aberto |
 | Testado em hardware real | ❌ Não testado | Nenhum dispositivo disponível |
 
 > O README e os docs seguem o princípio da referência: **sem otimismo**. Tudo que está "pendente" não foi construído. Consulte docs/TESTED.md para o que foi realmente executado.

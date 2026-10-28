@@ -334,31 +334,90 @@ Isso é exatamente o que `tools/difftest.py` existe para validar — e ele
 troca a ABI de 16.528 funções e dos 226 shims, e sem o oráculo x86 ligado o
 risco de "consertar" errado é alto. Fica registrada como bloqueador aberto.
 
-## 3. NÃO testado — nada abaixo foi executado
+### 2.9 CI: o APK sai do `build.yml`
+
+Quatro execuções no GitHub Actions, cada uma derrubando um defeito diferente.
+Nenhuma linha de C foi "achada no olho": os quatro problemas abaixo só
+apareceram porque o CI compilou de verdade.
+
+| Run | Modo | Onde parou | Causa medida |
+|---|---|---|---|
+| 40732101341 | push (app-only) | passo "Android SDK" | `android-actions/setup-android@v3` roda `sdkmanager tools`, pacote que **não existe mais**: `Warning: Failed to find package 'tools'` |
+| 40733271314 | full | `:app:processDebugResources` | `AAPT: error: resource style/X2WR not found` |
+| 40735670541 | full | `:app:compileDebugKotlin` | `'return' is not allowed here` + 2× `Uri?` vs `Uri` |
+| **40737389260** | **full** | **—** | **sucesso** |
+
+O que cada um ensinou:
+
+1. **`setup-android@v3` está quebrado** para o repositório atual do Google. O
+   runner `ubuntu-24.04` já traz `ANDROID_SDK_ROOT` e `cmdline-tools`; o passo
+   agora só aponta o `PATH` e instala plataforma/build-tools/NDK/cmake.
+2. **`X2WR.Status` sem `parent`**. O AAPT trata a notação de ponto como
+   herança: `X2WR.Status` herda de `X2WR`, que não existe. `parent=""` desliga
+   isso. (Só apareceu porque o `.xml` nunca tinha sido linkado.)
+3. **`return` puro dentro do lambda de `registerForActivityResult`**. Além de
+   ilegal, o ramo de saída deixa de ser terminante e `uri` continua `Uri?` no
+   smart cast — daí os três erros de uma vez. `return@registerForActivityResult`
+   resolve os três.
+4. **Deslocamento indefinido na rotação.** O CI emitiu
+   `-Wshift-count-overflow` em `gen/Wolvie_part007.c:28543` (e 014/029): o
+   lifter gerava `x >> (32 - cnt)`; com `cnt == 0` isso é `>> 32`, que é
+   **comportamento indefinido** em C. Corrigido para `(32 - cnt) & 0x1f` (com
+   `cnt == 0` a rotação vira `x | x == x`, que é o resultado certo) — e o `gen/`
+   foi regerado. Este era um bug de *correção*, não só um aviso.
+
+Resultado do run que passou (`40737389260`), medido:
+
+```
+toolchain:      NDK 27.0.12077973, Gradle 8.7, JDK 17, ubuntu-24.04
+artefato:       x2wr-apk-debug-full-8   13.056.270 bytes
+app-debug.apk:  14.077.625 bytes
+libx2wr.so:     24.647.744 bytes  (lib/arm64-v8a/)
+ELF:            e_type=3 (ET_DYN), e_machine=183 (AArch64), 64 bits, LE
+passos:         1..18 todos success (inclui "Verificar que o APK contém a arm64-v8a")
+```
+
+O `libx2wr.so` acima é o executável real do jogo recompilado: runtime + 11
+shims + as 16.528 funções liftadas, tudo em ARM64 nativo.
+
+**O que isso prova e o que não prova.** Prova que o pipeline de build funciona
+de ponta a ponta e que o código compila com o NDK para arm64. Não prova que o
+APK instala (não há dispositivo aqui), nem que o jogo chega ao menu — o
+bloqueador de §2.8 e a ausência de camada gráfica (§3.4) continuam valendo.
+
+## 3. NÃO testado — o que ainda falta
+
+> Leia esta seção junto com §2.9: compilar com o NDK e gerar o APK saíram
+> desta lista. O que resta aqui é o que realmente **não** foi executado.
 
 ### 3.1 Compilação
 
-> **Esta seção mudou.** Até a data da última revisão deste documento, nada
-> tinha sido compilado. Depois de obter um compilador real nesta máquina, o
-> runtime, os 11 shims e **todo** o `gen/` foram compilados para `aarch64` —
-> o resultado está em §2.5. O que continua **não** testado aqui:
+> **Esta seção mudou duas vezes.** Primeiro quando o runtime, os 11 shims e
+> todo o `gen/` foram compilados com `zig cc` (§2.5); depois quando o CI
+> compilou tudo com o **NDK de verdade** e emitiu o APK (§2.9). Portanto
+> *compilar para Android* e *gerar o APK* **saíram** desta lista.
 
-- **Compilar com o NDK / clang do Android (bionic)** — o compilador usado foi
-  `zig cc` (clang 18.1.6) para `aarch64-linux-musl`. É a mesma arquitetura e
-  praticamente o mesmo frontend, mas **não** é o NDK nem a libc do Android.
-- **Compilar os arquivos Android-específicos** (`x2rw_android_main.c`) — usam
-  `jni.h`, `android/log.h` e `AAssetManager`, ausentes aqui. Não compilados.
-- **Linkar o binário final do APK** — o link testado foi o do caminho
-  *app-only* com as tabelas vazias, usando o `main()` de teste.
-- **Emitir o APK** — nunca localmente; a regra do projeto proíbe build local
-  do APK. Isso continua exclusivo do CI.
+- ~~Compilar com o NDK / clang do Android (bionic)~~ — **feito no CI** (§2.9).
+- ~~Compilar os arquivos Android-específicos (`x2rw_android_main.c`)~~ —
+  **feito no CI** (§2.9).
+- **Instalar o APK** num aparelho ou emulador — não há dispositivo aqui. O
+  artefato existe e foi inspecionado por dentro (`lib/arm64-v8a/libx2wr.so`,
+  ELF AArch64), mas **ninguém o abriu**.
+- **Rodar o APK** — depende de instalar.
+- **Build local do APK** — continua proibido por regra do projeto; o APK só
+  nasce no CI.
 
 ### 3.2 Execução do jogo
 
-- O jogo **não foi executado** em nenhuma forma: nem no `desktop/`, nem em
-  emulador, nem em dispositivo.
-- O jogo **não chegou ao menu principal**. Isto é o critério de aceitação e
-  **não foi atingido**.
+- O jogo **foi executado** — mas só o binário **desktop aarch64** construído
+  aqui a partir dos mesmos fontes (`desktop/main.c` + runtime + shims + `gen/`),
+  não o APK. Resultado em §2.8: executa o CRT, chama `HeapCreate` e
+  `GetVersionExA`, e para num `call` para `VA 0x005c40ae` por causa do
+  deslocamento de 4 bytes na pilha.
+- O jogo **não chegou ao menu principal**. Critério de aceitação **não
+  atingido** — e mesmo com o bloqueador de §2.8 resolvido ele não chegaria:
+  `Direct3DCreate8` devolve `D3DERR_NOTAVAILABLE` enquanto não existir backend
+  gráfico (§3.4).
 - Nenhuma cena, nenhum som, nenhum frame foi renderizado.
 
 ### 3.3 Validação de correção do lifter
