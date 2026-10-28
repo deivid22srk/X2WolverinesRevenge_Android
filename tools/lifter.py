@@ -623,8 +623,10 @@ def lift_insn(insn, out: list[str], stats: dict, rng: dict) -> None:
                 out.append(f"goto L_{tgt:x};")
             else:
                 stats["tail_jumps"] = stats.get("tail_jumps", 0) + 1
+                stats["tail_targets"].add(tgt)
+                out.append(f"c->pc = {va:#x}u;")
                 out.append(f"/* salto de cauda para {tgt:#010x} */")
-                out.append(f"x2rw_call(c, {tgt:#010x}u);")
+                out.append(f"x2rw_tail(c, {tgt:#010x}u);")
                 out.append("return;")
         else:
             val, _ = read_op(insn, op)
@@ -645,8 +647,9 @@ def lift_insn(insn, out: list[str], stats: dict, rng: dict) -> None:
         else:
             stats["tail_jumps"] = stats.get("tail_jumps", 0) + 1
             out.append(f"/* salto de cauda condicional para {tgt:#010x} */")
+            stats["tail_targets"].add(tgt)
             out.append(f"if (x2rw_cond(c, {cc})) {{ "
-                       f"x2rw_call(c, {tgt:#010x}u); return; }}")
+                       f"x2rw_tail(c, {tgt:#010x}u); return; }}")
         return
 
     if mn in ("loop", "loope", "loopne", "loopz", "loopnz"):
@@ -664,7 +667,8 @@ def lift_insn(insn, out: list[str], stats: dict, rng: dict) -> None:
             out.append(f"{{ {dec} if ({cond}) goto L_{tgt:x}; }}")
         else:
             stats["tail_jumps"] = stats.get("tail_jumps", 0) + 1
-            out.append(f"{{ {dec} if ({cond}) {{ x2rw_call(c, {tgt:#010x}u); "
+            stats["tail_targets"].add(tgt)
+            out.append(f"{{ {dec} if ({cond}) {{ x2rw_tail(c, {tgt:#010x}u); "
                        "return; } }")
         return
     if mn == "jecxz":
@@ -675,7 +679,8 @@ def lift_insn(insn, out: list[str], stats: dict, rng: dict) -> None:
             out.append(f"if (c->r.ecx == 0u) goto L_{tgt:x};")
         else:
             stats["tail_jumps"] = stats.get("tail_jumps", 0) + 1
-            out.append(f"if (c->r.ecx == 0u) {{ x2rw_call(c, {tgt:#010x}u); "
+            stats["tail_targets"].add(tgt)
+            out.append(f"if (c->r.ecx == 0u) {{ x2rw_tail(c, {tgt:#010x}u); "
                        "return; }")
         return
 
@@ -683,8 +688,17 @@ def lift_insn(insn, out: list[str], stats: dict, rng: dict) -> None:
         if not need(1):
             return
         op = ops[0]
+        out.append(f"c->pc = {va:#x}u;")
         if op.type == capstone.x86.X86_OP_IMM:
-            out.append(f"x2rw_call(c, {op.imm & 0xffffffff:#x}u);")
+            alvo = op.imm & 0xffffffff
+            # Rede de segurança: alvo de `call` direto sem função liftada
+            # significa "call para VA não resolvido" em tempo de execução.
+            # Foi assim que 0x5cbddc morreu (a descoberta descartou a função
+            # por causa de um prólogo falso 7 bytes adiante). Aqui a entrada
+            # é criada em vez de gerar uma chamada que não tem destino.
+            if alvo not in _KNOWN and _IMG_LO <= alvo < _IMG_HI:
+                stats["tail_targets"].add(alvo)
+            out.append(f"x2rw_call(c, {alvo:#x}u);")
         else:
             val, _ = read_op(insn, op)
             out.append(f"x2rw_call(c, (uint32_t)({val}));")
@@ -692,8 +706,12 @@ def lift_insn(insn, out: list[str], stats: dict, rng: dict) -> None:
         return
 
     if mn in ("ret", "retf"):
-        if nos >= 1 and ops[0].type == capstone.x86.X86_OP_IMM:
-            out.append(f"c->r.esp += {ops[0].imm & 0xffffffff}u;")
+        # `ret` de verdade: descarta o endereço de retorno (4) e, no caso de
+        # `ret imm16` (stdcall), mais os argumentos que o chamado limpa.
+        # x2rw_call() empilhou o retorno, então os 4 bytes contam.
+        extra = (ops[0].imm & 0xffff) if (nos >= 1 and
+                                          ops[0].type == capstone.x86.X86_OP_IMM) else 0
+        out.append(f"c->r.esp += {4 + extra}u;")
         out.append("return;")
         return
     if mn == "leave":
@@ -1246,7 +1264,18 @@ def _next_reliable_after(va: int) -> int:
     return _RELIABLE[i] if i < len(_RELIABLE) else 0
 
 
-def lift_function(md, m: Module, func: dict, image: bytes, stats: dict):
+# VAs que já existem como função (preenchido em lift_module). Serve para o
+# lifter perceber, no momento em que emite uma chamada, que o alvo NÃO tem
+# código liftado — e criar a entrada em vez de gerar um call que vai falhar.
+_KNOWN: set = set()
+# Limites do módulo em endereços de guest (preenchidos em lift_module), para
+# não criar entrada para RVA/valor que não é código deste módulo.
+_IMG_LO = 0
+_IMG_HI = 0
+
+
+def lift_function(md, m: Module, func: dict, image: bytes, stats: dict,
+                  max_ext: int = 0x2000):
     rva = func["rva"]
     va = func["va"]
     size = func["size"]
@@ -1254,7 +1283,8 @@ def lift_function(md, m: Module, func: dict, image: bytes, stats: dict):
 
     # Alcance real (a estimativa de tamanho da descoberta subestima funções
     # longas — ver _extent). `lo` é sempre `va`; só `hi` cresce.
-    lo, hi = _extent(md, image, rva, va, size, hard_end=_next_reliable_after(va))
+    lo, hi = _extent(md, image, rva, va, size, max_ext=max_ext,
+                     hard_end=_next_reliable_after(va))
     code = image[rva:rva + (hi - lo)]     # RVA, não VA (ver _extent)
     insns = list(md.disasm(code, lo))
 
@@ -1308,7 +1338,22 @@ def lift_function(md, m: Module, func: dict, image: bytes, stats: dict):
             out.append(f'x2rw_unsupported(c, {insn.address:#x}u, "{e}");')
             stats["unsupported"] += 1
 
-    if not out or "return;" not in out[-1]:
+    # Fallthrough: se a última instrução da faixa NÃO termina o fluxo (caso
+    # em que _extent foi cortado pelo início confiável da função seguinte),
+    # o código não pode simplesmente `return` — o x86 continuaria executando
+    # no endereço seguinte. Emitimos a continuação como salto de cauda.
+    #
+    # Medido no entrypoint: `push 0xa; pop eax` em 0x5c310f, faixa cortada em
+    # 0x5c3110 (alvo de call). O C gerado dava `return;` e a função terminava
+    # sem executar o resto de _WinMainCRTStartup.
+    ultimo_termina = bool(insns) and (
+        insns[-1].mnemonic.split()[0] in TERMINATORS)
+    if not out:
+        out.append("return;")
+    elif not ultimo_termina:
+        stats["tail_targets"].add(hi)
+        out.append(f"/* cai para {hi:#010x} (faixa cortada sem terminador) */")
+        out.append(f"x2rw_tail(c, {hi:#010x}u);")
         out.append("return;")
     if has_indirect_jump and out and "return;" not in out[-1]:
         out.append("return;")
@@ -1363,15 +1408,18 @@ def lift_module(mod_path: str, m: Module, funcs_json: str, out_dir: str,
     md.detail = True
     md.syntax = capstone.CS_OPT_SYNTAX_INTEL
 
-    stats = {"unsupported": 0}
+    stats = {"unsupported": 0, "tail_targets": set()}
     funcs = disc["functions"]
 
     # Inícios confiáveis deste módulo (para _extent não invadir a função
     # seguinte). Flags: 1 ENTRY, 2 IAT_THUNK, 4 PROLOGUE, 8 CALL_TARGET,
     # 16 EXPORT. Só as confiáveis entram.
-    global _RELIABLE
+    global _RELIABLE, _KNOWN, _IMG_LO, _IMG_HI
     _RELIABLE = sorted(f["va"] for f in funcs
                        if f.get("flags", 0) & (1 | 2 | 8 | 16))
+    _KNOWN = {f["va"] for f in funcs}
+    _IMG_LO = m.imagebase
+    _IMG_HI = m.imagebase + len(image)
 
     # Lift de TODAS as funções primeiro. A partição precisa ser feita pelo
     # TAMANHO REAL do C gerado, não pelo tamanho estimado da função: a
@@ -1380,9 +1428,53 @@ def lift_module(mod_path: str, m: Module, funcs_json: str, out_dir: str,
     # arquivos (6 arquivos de 14 MB em vez de 16 equilibrados), o que
     # estoura a memória do compilador no runner do CI.
     lifted: list[tuple[int, str, str]] = []       # (va, nomes, fonte)
+    vistos: set[int] = set()
     for f in funcs:
         fname, src = lift_function(md, m, f, image, stats)
         lifted.append((f["va"], fname, src))
+        vistos.add(f["va"])
+
+    # ---- Fechamento dos alvos de salto de cauda -------------------------
+    # Um `jmp fim` para o epílogo de OUTRA função é comum no código do MSVC
+    # (epílogo compartilhado). Esses endereços não são início de função para
+    # a descoberta, então não existiriam como função liftada e x2rw_tail()
+    # não teria para onde transferir. Aqui eles viram entradas próprias.
+    #
+    # Medido em 0x5c3fa7 (`jmp 0x5c40ae`): sem isto, o alvo era tratado como
+    # chamada, empilhava uma sentinela a mais e a pilha saía desalinhada em
+    # 4 bytes — o que produzia um `call` para endereço inválido no aparelho.
+    novos = sorted(t for t in stats["tail_targets"] if t not in vistos)
+    extra = 0
+    for rodada in range(8):
+        if not novos:
+            break
+        antes = len(vistos)
+        for tgt in novos:
+            if tgt in vistos:
+                continue
+            base = m.imagebase
+            rva_t = tgt - base
+            if rva_t < 0 or rva_t >= len(image):
+                continue
+            # Janela CURTA de propósito: alvo de salto de cauda fora da
+            # faixa é, na prática, epílogo compartilhado do MSVC
+            # (`pop ebx; leave; ret`, 3 bytes). Deixar _extent correr aqui
+            # custou caro: com 8 KiB por alvo o total foi de 939 mil para
+            # 4,1 milhões de instruções e a cobertura CAIU de 99,75% para
+            # 94,28% (código inalcançável desmontado como se fosse função).
+            f = {"va": tgt, "rva": rva_t, "size": 16,
+                 "flags": 0, "name": f"sub_stub_{rva_t:x}"}
+            fname, src = lift_function(md, m, f, image, stats, max_ext=0x40)
+            lifted.append((tgt, fname, src))
+            vistos.add(tgt)
+            extra += 1
+        # lift_function pode ter descoberto novos alvos de cauda.
+        novos = sorted(t for t in stats["tail_targets"] if t not in vistos)
+        if len(vistos) == antes:
+            break
+    if extra:
+        print(f"[lifter] {m.name}: +{extra} entradas de epílogo/salto de cauda")
+    stats["tail_stubs"] = extra
 
     total_chars = sum(len(src) for _, _, src in lifted) or 1
     n_parts = max(1, jobs)

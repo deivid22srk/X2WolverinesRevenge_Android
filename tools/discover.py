@@ -173,15 +173,45 @@ def discover_module(path: str, m: Module, lift: bool = False) -> dict:
                         mark(target, flags["CALL_TARGET"])
         off = (insns[-1].address + insns[-1].size) - text_va
 
+    # ---- funde inícios próximos antes de calcular tamanhos ----
+    #
+    # BUG MEDIDO: o filtro de tamanho mínimo descartava a função REAL quando
+    # um prólogo FALSO caía poucos bytes depois dela. Caso concreto neste
+    # binário: `call 0x5cbddc` (prólogo legítimo: push ebp; mov ebp,esp;
+    # sub esp,0x48; push ebx/esi/edi) e um falso início em 0x5cbde3, 7 bytes
+    # adiante, no MEIO de `push ebx`. Distância 7 < MIN_FUNC_BYTES -> a função
+    # de verdade era removida da tabela e o código liftado chamava um VA que
+    # não existia em lugar nenhum ("call para VA não resolvido").
+    #
+    # Regra: quem manda é a evidência. CALL_TARGET/ENTRY/EXPORT/IAT_THUNK são
+    # fortes; PROLOGUE é palpite por busca de bytes. Se só um dos dois for
+    # forte, o fraco sai — e o forte herda os bytes.
+    FORTE = (flags["ENTRY"] | flags["IAT_THUNK"] | flags["CALL_TARGET"]
+             | flags["EXPORT"])
+    limpos: list[int] = []
+    for rva in sorted(funcs):
+        if limpos and rva - limpos[-1] < MIN_FUNC_BYTES:
+            ant = limpos[-1]
+            ant_forte = bool(funcs[ant] & FORTE)
+            novo_forte = bool(funcs[rva] & FORTE)
+            if ant_forte and not novo_forte:
+                continue                    # o novo é prólogo falso
+            if novo_forte and not ant_forte:
+                limpos[-1] = rva            # o anterior é que era falso
+                continue
+        limpos.append(rva)
+
     # ---- monta a tabela final com tamanhos ----
-    rvas = sorted(funcs)
+    rvas = limpos
     out_funcs = []
     for idx, rva in enumerate(rvas):
         nxt = rvas[idx + 1] if idx + 1 < len(rvas) else text_end
         size = nxt - rva
         if size < MIN_FUNC_BYTES or size > MAX_FUNC_BYTES:
-            # função muito pequena: provavelmente share de tail-call ou padding
-            if not (funcs[rva] & flags["ENTRY"]):
+            # Pequena demais (share de tail-call/padding) ou grande demais.
+            # Só descarta palpite fraco: alvo de call/export NUNCA pode ser
+            # jogado fora — foi isso que apagou 0x5cbddc da tabela.
+            if not (funcs[rva] & FORTE):
                 continue
             size = min(max(size, MIN_FUNC_BYTES), MAX_FUNC_BYTES)
         out_funcs.append(

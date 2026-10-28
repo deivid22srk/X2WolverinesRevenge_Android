@@ -745,7 +745,7 @@ static uint32_t g_trace_va[X2RW_TRACE_N];
 static int g_trace_pos = 0;
 static int g_trace_on = -1;
 
-static int x2rw_trace_enabled(void) {
+int x2rw_trace_on(void) {
     if (g_trace_on < 0) {
         const char *e = getenv("LB_TRACE");
         g_trace_on = (e && e[0] && e[0] != '0') ? 1 : 0;
@@ -754,7 +754,7 @@ static int x2rw_trace_enabled(void) {
 }
 
 void x2rw_trace_dump(void) {
-    if (!x2rw_trace_enabled()) return;
+    if (!x2rw_trace_on()) return;
     x2rw_log("[trace] ultimas %d chamadas (mais antiga primeiro):",
              X2RW_TRACE_N);
     for (int k = 0; k < X2RW_TRACE_N; k++) {
@@ -765,15 +765,67 @@ void x2rw_trace_dump(void) {
 
 void x2rw_call(x2rw_ctx *c, uint32_t va) {
     if (c->fault) return;
-    if (x2rw_trace_enabled()) {
+    if (x2rw_trace_on()) {
         g_trace_va[g_trace_pos] = va;
         g_trace_pos = (g_trace_pos + 1) % X2RW_TRACE_N;
     }
     x2rw_fn_t fn = x2rw_resolve(va);
     if (!fn) {
-        /* Pode ser um thunk/import: tenta a camada de imports. */
+        /* Pode ser um thunk/import: tenta a camada de imports.
+         *
+         * A SENTINELA PRECISA ESTAR NA PILHA ANTES DAQUI. O dispatcher lê os
+         * argumentos em esp+4+4*i e desconta 4*(nargs+1): ele pressupõe o
+         * endereço de retorno. Empilhar depois fazia o import receber os
+         * argumentos deslocados — medido:
+         *   HeapCreate(00001000, 00000000, fffffff0)  [correto: 1, 1000, 0]
+         *   InitializeCriticalSection(fffffff0)       [recebeu a sentinela]
+         */
+        x2rw_push(c, X2RW_RET_SENTINEL);
         if (x2rw_import_dispatch(c, va)) return;
+        c->r.esp += 4u;                 /* desfaz: vamos falhar mesmo */
         x2rw_fault(c, X2RW_FAULT_UNRESOLVED, va, "call para VA não resolvido");
+        x2rw_trace_dump();
+        return;
+    }
+    g_fixup_count++;
+    /* Empilha um endereço de retorno sintético.
+     *
+     * O código x86 original foi compilado assumindo que, ao entrar numa
+     * função, [esp] é o endereço de retorno e os argumentos começam em
+     * [esp+4]. Sem esta sentinela, TODA leitura de argumento na pilha saía
+     * deslocada em 4 bytes (ver docs/TESTED.md §2.8: `_heap_init` lê
+     * `[esp+8]` esperando arg0 e recebia arg1, e o port morria num `call`
+     * para um epílogo).
+     *
+     * O valor é irrelevante: o retorno acontece no C. `ret` no código
+     * liftado desconta 4+imm8 e o dispatch de imports desconta
+     * 4*(nargs+1), então a pilha volta ao lugar. */
+    x2rw_push(c, X2RW_RET_SENTINEL);
+    fn(c);
+}
+
+/* Salto de cauda (jmp) para outra função, com a pilha INTACTA.
+ *
+ * Diferença crucial em relação a x2rw_call: aqui não se empilha nada. O
+ * `jmp` do x86 não empilha, então a sentinela de retorno que já está na
+ * pilha continua sendo a única — é ela que o `ret` da função de destino
+ * vai consumir, devolvendo o controle direto para quem chamou.
+ *
+ * Por que não usar x2rw_call: em 0x5c3fa7 o jogo faz `jmp 0x5c40ae`, que é
+ * o `pop ebx; leave; ret` (epílogo compartilhado do MSVC). Com uma sentinela
+ * a mais, o `pop ebx` do epílogo consumia a sentinela e o `ret` seguinte
+ * desalinhava a pilha em 4 bytes. */
+void x2rw_tail(x2rw_ctx *c, uint32_t va) {
+    if (c->fault) return;
+    if (x2rw_trace_on()) {
+        g_trace_va[g_trace_pos] = va;
+        g_trace_pos = (g_trace_pos + 1) % X2RW_TRACE_N;
+    }
+    x2rw_fn_t fn = x2rw_resolve(va);
+    if (!fn) {
+        if (x2rw_import_dispatch(c, va)) return;
+        x2rw_fault(c, X2RW_FAULT_UNRESOLVED, va,
+                   "salto de cauda para VA não resolvido");
         x2rw_trace_dump();
         return;
     }

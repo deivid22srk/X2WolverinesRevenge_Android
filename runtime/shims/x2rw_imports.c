@@ -270,21 +270,36 @@ uint32_t x2rw_com_object_create(x2rw_ctx *c, const uint32_t *vtbl_vas, uint32_t 
 /* Invocação                                                          */
 /* ------------------------------------------------------------------ */
 
+/* Nome do import em resolução, para o log de rastreio. */
+static const char *g_trace_sym;
+static int g_trace_sym_nargs;
+
 static uint32_t invoke_from_stack(x2rw_ctx *c, x2rw_api_t fn, int nargs) {
     uint32_t args[X2RW_STACK_MAX_ARGS];
     int n = nargs;
     if (n < 0) n = 0;
     if (n > X2RW_STACK_MAX_ARGS) n = X2RW_STACK_MAX_ARGS;
-    /* stdcall: arg0 está EXATAMENTE em esp (sem endereço de retorno). */
+    /* stdcall com o endereço de retorno sintético em [esp]: arg0 em esp+4. */
     for (int i = 0; i < n; i++)
-        args[i] = x2rw_read32(c, c->r.esp + (uint32_t)(4 * i));
+        args[i] = x2rw_read32(c, c->r.esp + (uint32_t)(4 + 4 * i));
+
+    /* Rastreio de chamadas de import: sem isto, "os argumentos chegam
+     * estranhos" não tem como ser localizado (foi assim que o off-by-4 da
+     * pilha ficou escondido atrás de sintomas no CRT). */
+    if (x2rw_trace_on() && g_trace_sym) {
+        x2rw_log("[imp] pc=%08x %s(%08x, %08x, %08x, %08x) nargs=%d",
+                 c->pc, g_trace_sym,
+                 n > 0 ? args[0] : 0u, n > 1 ? args[1] : 0u,
+                 n > 2 ? args[2] : 0u, n > 3 ? args[3] : 0u, nargs);
+    }
 
     uint32_t r;
     if (fn) r = fn(c, args, nargs);
     else    r = shim_unimplemented(c, args, nargs);
 
-    /* callee limpa a pilha (stdcall) */
-    c->r.esp += 4u * (uint32_t)nargs;
+    /* callee limpa a pilha (stdcall): os argumentos E o endereço de
+     * retorno sintético que x2rw_call empilhou. */
+    c->r.esp += 4u * (uint32_t)(nargs + 1);
     c->r.eax = r;
     return r;
 }
@@ -321,7 +336,9 @@ int x2rw_import_dispatch(x2rw_ctx *c, uint32_t va) {
         if (idx < (uint32_t)X2RW_N_SHIMS) {
             const x2rw_shim_t *sh = &g_shims[idx];
             g_current_shim = sh;
+            g_trace_sym = sh->name;
             invoke_from_stack(c, sh->fn, sh->nargs);
+            g_trace_sym = NULL;
             g_current_shim = NULL;
             return 1;
         }
@@ -339,7 +356,9 @@ int x2rw_import_dispatch(x2rw_ctx *c, uint32_t va) {
                  sh->dll, sh->name, va);
     }
     g_current_shim = sh;
+    g_trace_sym = sh->name;
     invoke_from_stack(c, sh->fn, sh->nargs);
+    g_trace_sym = NULL;
     g_current_shim = NULL;
     return 1;
 }

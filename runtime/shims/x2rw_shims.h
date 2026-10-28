@@ -553,12 +553,16 @@ const x2rw_audio_hooks *x2rw_audio_get_hooks(void);
 /* ------------------------------------------------------------------ */
 /* Helper de argumentos (ABI stdcall do lifter)                       */
 /* ------------------------------------------------------------------ */
-/* O lifter NÃO empilha endereço de retorno: x2rw_call(c, va) só transfere
- * controle. Logo o primeiro argumento está em c->r.esp (não em esp+4).
- * Este helper lê o i-ésimo argumento direto da pilha do guest; o dispatcher
- * usa a mesma regra para montar o array `args` entregue aos handlers. */
+/* `x2rw_call` empilha um endereço de retorno sintético (X2RW_RET_SENTINEL)
+ * antes de entrar na função, exatamente como um `call` de verdade: ao entrar,
+ * [esp] é o retorno e o primeiro argumento está em esp+4.
+ *
+ * A versão anterior lia o argumento em esp+0 (modelo "sem retorno"), o que
+ * deslocava toda leitura de argumento do código liftado em 4 bytes — foi o
+ * bloqueador medido em docs/TESTED.md §2.8. O dispatcher usa esta mesma
+ * regra em invoke_from_stack(). */
 static inline uint32_t x2rw_arg(x2rw_ctx *c, int i) {
-    return x2rw_read32(c, c->r.esp + (uint32_t)(4 * i));
+    return x2rw_read32(c, c->r.esp + (uint32_t)(4 + 4 * i));
 }
 
 #ifdef __cplusplus

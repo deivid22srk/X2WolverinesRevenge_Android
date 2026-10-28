@@ -26,6 +26,12 @@ extern "C" {
 #define X2RW_STACK_MAX_ARGS 64
 
 /* Módulos carregados (endereços de carga verificados — docs/RECON.md) */
+/* Endereço de retorno sintético empilhado por x2rw_call(). O valor não é
+ * usado como endereço (o retorno acontece no C); ele só ocupa o lugar que o
+ * `call` do x86 ocuparia, mantendo `[esp+4]` como o primeiro argumento
+ * dentro do código liftado. Ver docs/TESTED.md §2.8. */
+#define X2RW_RET_SENTINEL 0xFFFFFFF0u
+
 #define X2RW_BASE_WOLVIE   0x00400000u
 #define X2RW_BASE_BINK     0x30000000u
 
@@ -79,6 +85,15 @@ typedef struct x2rw_ctx {
 
     /* Alvo de um salto indireto (tabela de salto do jogo) */
     uint32_t jump_target;
+
+    /* Último endereço de ORIGEM de chamada visto (o "callsite"), escrito
+     * pelo código liftado antes de cada call/salto de cauda.
+     *
+     * Existe por necessidade de diagnóstico: quando o guest trava, saber
+     * "qual função" morreu não basta — foi assim que o off-by-4 da pilha
+     * ficou escondido. Com o callsite, a falha aponta para a instrução
+     * exata. Custa um store por chamada. */
+    uint32_t pc;
 
     /* Registradores SIMD: MMX (64 bits) e SSE (128 bits) */
     uint64_t mm[8];
@@ -281,8 +296,17 @@ x2rw_fn_t x2rw_resolve(uint32_t va);
 /* Executa um VA (entrypoint do jogo). */
 void x2rw_call(x2rw_ctx *c, uint32_t va);
 
+/* Salto de cauda (jmp) para outra função: transfere o controle SEM empilhar
+ * endereço de retorno — é o que o `jmp` do x86 faz. Ver x2rw_tail() em
+ * x2rw_runtime.c para o motivo (epílogos compartilhados do MSVC). */
+void x2rw_tail(x2rw_ctx *c, uint32_t va);
+
 /* Despeja o rastro circular de chamadas (LB_TRACE=1). */
 void x2rw_trace_dump(void);
+
+/* Verdadeiro quando LB_TRACE está ligado (ver x2rw_runtime.c). Usado pelos
+ * shims para não pagar o custo do log de rastreio quando ele está desligado. */
+int x2rw_trace_on(void);
 
 /* Chamadas a imports: o shim é implementado pelo módulo de runtime. */
 typedef uint32_t (*x2rw_api_t)(x2rw_ctx *c, uint32_t *args, int nargs);

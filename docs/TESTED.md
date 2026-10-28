@@ -274,65 +274,71 @@ Antes → depois (medido):
 | Tempo de lifting (`--jobs 32`) | 69,85 s | **81,27 s** |
 | Entrypoint liftado | 29 bytes | **206 bytes** |
 
-### 2.8 BLOQUEADOR ABERTO: convenção de chamada da pilha
+### 2.8 CORRIGIDO: convenção de chamada da pilha (off-by-4 em todo argumento)
 
-Este é o achado mais importante desta rodada e **não está corrigido**.
+Este era o bloqueador principal. **Está corrigido**, e a correção foi
+verificada duas vezes: no desmontar do próprio binário e num aparelho real.
 
-O projeto adota, por decisão documentada em `x2rw_shims.h`, o modelo "sem
-endereço de retorno": `x2rw_call(c, va)` chama `fn(c)` direto, sem empilhar
-nada, e `ret` só faz `return;`. O primeiro argumento ficaria em `esp` (não em
-`esp+4`). O dispatcher de imports segue essa regra (`x2rw_arg(c,i)` lê
-`esp + 4*i`; o handler desconta `4*nargs`).
+O projeto adotava, por decisão documentada em `x2rw_shims.h`, o modelo "sem
+endereço de retorno": `x2rw_call(c, va)` chamava `fn(c)` direto, sem empilhar
+nada, e `ret` só fazia `return;`. O primeiro argumento ficava em `esp`.
 
-O problema: **o código x86 original foi compilado para o modelo com endereço
-de retorno**. Ele acessa argumentos com os deslocamentos reais, e esses
-deslocamentos ficam 4 bytes deslocados no nosso modelo. Exemplo do próprio
-binário, `_heap_init` em `0x5c40b1`:
+O código x86 original, porém, foi compilado para o modelo **com** endereço de
+retorno, e acessa os argumentos pelos deslocamentos reais. Prova tirada do
+próprio binário — `_heap_init` em `0x5c40b1`:
 
 ```asm
-005c40b1  xor  eax, eax
-005c40b3  push 0
-005c40b5  cmp  dword ptr [esp + 8], eax    ; no x86 real: arg0 == 0
+005c40b1  xor   eax, eax
+005c40b3  push  0
+005c40b5  cmp   dword ptr [esp + 8], eax   ; lê o ARG0 depois de 1 push
 ```
 
-No x86 real, no entry `esp` aponta para o endereço de retorno; depois de
-`push 0`, `[esp+8]` é `arg0`. No nosso modelo, `esp` já aponta para `arg0`,
-então `[esp+8]` é `arg1`. **Toda leitura de argumento na pilha está 4 bytes
-deslocada.**
+No entry de `_heap_init`, `arg0` está em `[esp+4]` — depois do `push 0`, o
+mesmo valor cai em `[esp+8]`. Isso só fecha com o endereço de retorno em
+`[esp]`. No modelo antigo `arg0` estava em `[esp]`, então `[esp+8]` era
+`arg1`: **toda leitura de argumento na pilha estava 4 bytes deslocada.**
 
-Consequência observada ao executar (`LB_TRACE=1`):
+Segunda confirmação, agora em `_alloca_probe` (`0x5c1770`), que existe para
+provar que o valor empilhado é lido de volta do lugar certo:
 
-```
-[trace] x2rw_call(005c3042)   entrypoint
-[trace] x2rw_call(001deeb0)   import resolvido pelo RVA de hint/name
-[trace] x2rw_call(005c40b1)   _heap_init
-[trace] x2rw_call(005d4200)   HeapCreate (import)
-[trace] x2rw_call(005c3f69)
-[trace] x2rw_call(005c1770)   _alloca_probe: termina em push/ret
-[trace] x2rw_call(005d4158)   GetVersionExA (import)
-[trace] x2rw_call(005c40ae)   ← pop ebx; leave; ret  (epílogo, não é função)
-[falha] code=3 va=005c40ae msg=call para VA não resolvido
+```asm
+005c1792  mov   eax, esp
+005c1798  mov   ecx, [eax]        ; salva o que estava em [esp]
+005c179a  mov   eax, [eax + 4]    ; <-- lê o ENDEREÇO DE RETORNO
+005c179d  push  eax
+005c179e  ret                     ; "retorna" usando o valor relido
 ```
 
-Nota sobre `0x001deeb0`: **não** é lixo. A IAT do jogo não é reescrita no
-carregamento, então `call [slot]` entrega o RVA da estrutura
-`IMAGE_IMPORT_BY_NAME` em `.rdata`; `resolve_va_deep()` mapeia esse RVA de
-volta para o símbolo certo. Por isso a importação é despachada corretamente
-com ou sem `X2RW_PATCH_IAT` (medido nos dois modos) — reescrever a IAT é
-redundante, e o padrão do port (sem reescrever) está correto.
+Ou seja: o binário tem código cuja função é recuperar `[esp+4]` como endereço
+de retorno. Sem a sentinela, ele releria `arg0`.
 
-Como corrigir (as três partes precisam mudar juntas, senão uma conserta e a
-outra quebra):
+O que mudou (as três partes juntas, como registrado antes):
 
-1. `x2rw_call()` empilha um endereço de retorno sentinela antes de `fn(c)`;
-2. `ret` vira `esp += 4 + imm16` (e o salto de cauda passa a desempilhar a
-   própria sentinela antes de retornar);
-3. `x2rw_arg(c,i)` lê `esp + 4 + 4*i` e o dispatcher desconta `4*(nargs+1)`.
+1. `x2rw_call()` empilha `X2RW_RET_SENTINEL` (`0xFFFFFFF0`) antes de `fn(c)`;
+2. `ret` no código liftado virou `c->r.esp += 4 + imm16; return;`;
+3. `x2rw_arg(c,i)` lê `esp + 4 + 4*i` e o dispatcher de imports desconta
+   `4*(nargs+1)`.
 
-Isso é exatamente o que `tools/difftest.py` existe para validar — e ele
-**nunca foi executado** (§3.3). Não fiz essa mudança sob pressa de tempo: ela
-troca a ABI de 16.528 funções e dos 226 shims, e sem o oráculo x86 ligado o
-risco de "consertar" errado é alto. Fica registrada como bloqueador aberto.
+O valor da sentinela é irrelevante: o retorno acontece no C. O que importa é
+o **espaço** que ela ocupa, que é o que mantém `[esp+4]` sendo o primeiro
+argumento.
+
+Efeito medido no desktop (aarch64, `LB_TRACE=1`), antes e depois:
+
+```
+antes:  [k32] HeapCreate
+        [trace] ... x2rw_call(005d4158)  GetVersionExA
+        [trace] x2rw_call(005c40ae)  <- falha
+depois: [k32] HeapCreate
+        [k32] GetEnvironmentVariableA(''): não existe   <- argumento read coerente
+        [trace] ... x2rw_call(001deeee)
+        [trace] x2rw_call(005c409b)  <- falha (outra causa, ver 2.10)
+```
+
+O ponto importante do "depois" não é chegar mais longe: é que
+`GetEnvironmentVariableA` passou a receber uma string vazia plausível em vez
+de lixo — sinal de que a leitura de argumento passou a apontar para o lugar
+certo.
 
 ### 2.9 CI: o APK sai do `build.yml`
 
@@ -384,6 +390,101 @@ shims + as 16.528 funções liftadas, tudo em ARM64 nativo.
 de ponta a ponta e que o código compila com o NDK para arm64. Não prova que o
 APK instala (não há dispositivo aqui), nem que o jogo chega ao menu — o
 bloqueador de §2.8 e a ausência de camada gráfica (§3.4) continuam valendo.
+
+### 2.10 CORRIGIDO: jmp para epílogo compartilhado (empilhava sentinela a mais)
+
+Depois da correção de ABI, o jogo passou a morrer em `0x005c409b`, ainda
+"call para VA não resolvido". A causa é outra, e é uma armadilha clássica do
+código gerado pelo MSVC: **epílogo compartilhado**.
+
+Em `0x5c3f69`:
+
+```asm
+005c3fa4  push   1
+005c3fa6  pop    eax
+005c3fa7  jmp    0x5c40ae        ; não é call: é um salto
+```
+
+`0x5c40ae` não inicia função nenhuma. É o fim (`pop ebx; leave; ret`) que
+várias funções reusam:
+
+```asm
+005c40ae  pop    ebx
+005c40af  leave
+005c40b0  ret
+```
+
+A descoberta nunca marcou esse endereço como função — ele não tem prólogo nem
+`call` apontando para ele. O lifter, vendo um `jmp` para fora da faixa,
+transformava em `x2rw_call(c, alvo)`. E `x2rw_call` **empilha a sentinela**.
+O `pop ebx` do epílogo então consumia a sentinela em vez do `ebx` salvo, e o
+`ret` seguinte desalinhava a pilha em 4 bytes. Foi esse desalinhamento que
+produziu o `call` para endereço inválido no aparelho.
+
+Correção em duas partes:
+
+1. `x2rw_tail(c, va)` — transfere o controle **sem empilhar nada**, que é o
+   que o `jmp` do x86 faz. A sentinela que já está na pilha continua sendo a
+   única, e é ela que o `ret` do destino consome. Todo `jmp`/`jcc`/`loop`
+   para fora da faixa passou a usar isso em vez de `x2rw_call`.
+2. Fechamento dos alvos: o alvo de um salto de cauda é liftado como entrada
+   própria (com janela curta), senão `x2rw_resolve()` não teria para onde
+   transferir. Medido: **+32.002 entradas no Wolvie, +1.488 na binkw32**.
+
+A primeira tentativa do item 2 deu errado e está registrada porque o erro é
+instrutivo: deixei `_extent` correr até 8 KiB por alvo. O total de instruções
+foi de 939 mil para **4,1 milhões** e a cobertura **caiu** de 99,75% para
+94,28% — os alvos são epílogos de 3 bytes, e a janela larga desmontava código
+inalcançável (e dados) como se fosse função. Com janela de 64 bytes:
+1.295.543 instruções, 99,55% cobertas.
+
+### 2.11 CORRIGIDO no aparelho: "Falha ao iniciar (código 1)" era permissão
+
+Primeiro teste em aparelho real (motorola edge 30 fusion, Android 13/API 34),
+com o APK do CI instalado. O log do aparelho:
+
+```
+I X2WR : pasta do jogo: /storage/emulated/0/Download/X2 Wolverine/X2 Wolverine's Revenge
+E X2WR : abrir .../Wolvie.exe: Permission denied
+E X2WR : nativeRun: x2rw_host_init falhou        -> "Falha ao iniciar (código 1)"
+```
+
+Não era a pasta. No Android 11+ o `stat` em `/storage/emulated/0` é liberado
+mesmo sem permissão, mas o `open()` não é. A validação do launcher usava
+`File.isDirectory`/`isFile` — que são `stat` — e passava; quem falhava era o
+`open()` do C, 4 chamadas depois.
+
+O SAF (`OpenDocumentTree`) **não** resolve sozinho: ele dá acesso por
+`content://` URI, e o jogo abre arquivos por caminho (`data.pkr`,
+`wavs.pkr`, `movies/*.bik`, `Wolvie.ini`). Migrar para SAF seria reescrever
+todo o I/O do jogo.
+
+O que foi feito:
+
+* `MANAGE_EXTERNAL_STORAGE` (`Todos os arquivos`) no manifesto, mais
+  `requestLegacyExternalStorage` para a API 29 e `READ_EXTERNAL_STORAGE`
+  pedido em tempo de execução até a API 29;
+* `GameFolder.isReadable()` passou a provar a leitura abrindo os arquivos
+  obrigatórios e lendo 1 byte — nada de `isFile`;
+* o botão JOGAR, se não conseguir ler, abre a tela de permissão, explica o
+  motivo e continua sozinho quando o usuário volta;
+* a mensagem de erro do código 1 deixou de culpar a pasta.
+
+**Resultado medido no aparelho depois da correção** (segundo log):
+
+```
+I X2WR : /storage/.../Wolvie.exe: 2916352 bytes
+I X2WR : Wolvie.exe mapeado em 0x00400000 (entry RVA 0x1c3042, 2916352 bytes)
+I X2WR : binkw32.dll mapeado em 0x30000000 (377856 bytes)
+I X2WR : módulos registrados: 16069 + 459 funções
+I X2WR : nativeRun: chamando entrypoint VA=0x005c3042 (RVA=0x1c3042 lido do PE)
+E X2WR : nativeRun: fault code=3 va=0x005c40ae msg=call para VA não resolvido
+```
+
+Ou seja: o port **abre os arquivos, carrega os dois PE, registra os módulos e
+executa código lifted dentro do aparelho**. O que falta ali é justamente o
+`0x5c40ae` do item 2.10 — o mesmo defeito reproduzido no desktop, o que
+confirma que o harness de desktop é um oráculo válido para o aparelho.
 
 ## 3. NÃO testado — o que ainda falta
 

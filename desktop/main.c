@@ -253,6 +253,12 @@ int main(int argc, char **argv) {
         fprintf(stderr, "[x2wr] FAULT code=%u va=0x%08x msg=%s\n",
                 (unsigned)g_ctx->fault_code, (unsigned)g_ctx->fault_va,
                 g_ctx->fault_msg ? g_ctx->fault_msg : "?");
+        fprintf(stderr, "[x2wr] estado: esp=%08x ebp=%08x eip_pc=%08x\n",
+                g_ctx->r.esp, g_ctx->r.ebp, g_ctx->pc);
+        /* Qualquer falha merece a cadeia de chamadas: sem ela o diagnóstico
+         * vira adivinhação (foi assim que o off-by-4 da pilha passou tanto
+         * tempo escondido). */
+        x2rw_trace_dump();
         return 3;
     }
 
