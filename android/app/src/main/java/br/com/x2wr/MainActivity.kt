@@ -165,7 +165,11 @@ class MainActivity : AppCompatActivity() {
     ) { uri: Uri? ->
         if (uri == null) {
             setStatus(getString(R.string.status_pick_cancelled))
-            return
+            // `return` puro nao e permitido dentro do lambda de
+            // registerForActivityResult; sem o rotulo o compilador tambem
+            // nao considera o ramo terminante e `uri` fica Uri? (erros
+            // 168/174/183 medidos no run 40735670541).
+            return@registerForActivityResult
         }
         // Sem permissão persistente o acesso morre quando o processo é
         // recriado — e o jogo roda por muito tempo.
