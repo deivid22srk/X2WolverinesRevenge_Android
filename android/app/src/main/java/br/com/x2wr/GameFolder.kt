@@ -169,6 +169,32 @@ object GameFolder {
         )
     }
 
+    /**
+     * Diz se o processo CONSEGUE LER os arquivos obrigatórios da pasta.
+     *
+     * Não use `isFile`/`isDirectory` para isso: no Android 11+ o `stat` é
+     * liberado em /storage/emulated/0 mesmo sem permissão, então
+     * `File(".../Wolvie.exe").isFile` devolve true e o `open()` do código
+     * nativo devolve EACCES logo depois. Foi exatamente essa mentira que
+     * produziu "Falha ao iniciar (código 1)" no primeiro teste em aparelho
+     * real. Aqui a checagem é um open() de verdade: abre e lê 1 byte.
+     */
+    fun isReadable(path: String): Boolean {
+        if (path.isEmpty()) return false
+        val dir = File(path)
+        if (!dir.isDirectory) return false
+        for (nome in REQUIRED) {
+            val f = File(dir, nome)
+            try {
+                // Abrir e ler 1 byte: é o teste que o open() do C faria.
+                f.inputStream().use { it.read() }
+            } catch (e: Exception) {
+                return false
+            }
+        }
+        return true
+    }
+
     /** Valida um caminho plano de filesystem (ex.: /sdcard/X2). */
     fun validatePath(path: String): Outcome {
         val dir = File(path)
@@ -246,6 +272,10 @@ object GameFolder {
             else -> "/storage/$volume"
         }
         val full = if (relative.isEmpty()) base else "$base/$relative"
+        // Devolve o caminho mesmo sem permissão de leitura, de propósito:
+        // quem decide pedir a permissão é o botão JOGAR (ver
+        // MainActivity.play + isReadable). Devolver null aqui jogaria o
+        // launcher no ramo "sem caminho nativo" e a mensagem sairia errada.
         return if (File(full).isDirectory) full else null
     }
 

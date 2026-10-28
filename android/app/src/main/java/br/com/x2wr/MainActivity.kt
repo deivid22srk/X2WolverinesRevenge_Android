@@ -1,9 +1,13 @@
 package br.com.x2wr
 
+import android.Manifest
 import android.content.Intent
 import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
+import android.provider.Settings
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -128,6 +132,9 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         goImmersive()
+        // Voltando da tela de permissão: se o usuário concedeu, continua o
+        // que ele pediu (JOGAR) em vez de obrigá-lo a tocar de novo.
+        if (jogarPendente) tentarJogarPendente()
         // O overlay só deve capturar toque quando o jogo está rodando; na
         // tela do launcher, os botões da UI é que importam.
         overlay.controlsEnabled = running
@@ -334,12 +341,97 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ------------------------------------------------------------------
+    // Permissão de armazenamento
+    // ------------------------------------------------------------------
+
+    /**
+     * Por que isto existe (bug real, medido em aparelho):
+     *
+     *   I X2WR : pasta do jogo: /storage/emulated/0/Download/...
+     *   E X2WR : abrir .../Wolvie.exe: Permission denied
+     *   E X2WR : nativeRun: x2rw_host_init falhou   ->  "código 1"
+     *
+     * No Android 11+ o `stat` em /storage/emulated/0 é liberado mesmo sem
+     * permissão, então validar a pasta com isDirectory/isFile dá falso
+     * positivo — quem falha é o open(). A correção é: (1) pedir
+     * MANAGE_EXTERNAL_STORAGE (API 30+) para manter o I/O por caminho que o
+     * jogo usa; (2) antes de lançar, provar a leitura abrindo os arquivos.
+     */
+    private var jogarPendente = false
+
+    private val pedirLeitura = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { concedida: Boolean ->
+        if (concedida) {
+            tentarJogarPendente()
+        } else {
+            setStatus(getString(R.string.err_sem_permissao))
+        }
+    }
+
+    private fun temAcessoAArquivos(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Environment.isExternalStorageManager()
+        } else {
+            checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) ==
+                PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+    private fun pedirAcessoAArquivos() {
+        setStatus(getString(R.string.msg_pedir_acesso))
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // Tela "Todos os arquivos" direto no app; sem a variante por
+            // pacote em alguns aparelhos, cai na lista geral.
+            val porPacote = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+            porPacote.data = Uri.parse("package:$packageName")
+            try {
+                startActivity(porPacote)
+            } catch (e: Exception) {
+                try {
+                    startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+                } catch (e2: Exception) {
+                    setStatus(getString(R.string.err_sem_permissao))
+                }
+            }
+        } else {
+            pedirLeitura.launch(Manifest.permission.READ_EXTERNAL_STORAGE)
+        }
+    }
+
+    /** Chamado ao voltar da tela de permissão. */
+    private fun tentarJogarPendente() {
+        if (!jogarPendente) return
+        val ok = ready ?: return
+        if (!GameFolder.isReadable(ok.nativePath)) {
+            jogarPendente = false
+            setStatus(getString(R.string.err_sem_permissao))
+            return
+        }
+        jogarPendente = false
+        play()
+    }
+
+    // ------------------------------------------------------------------
     // Execução
     // ------------------------------------------------------------------
 
     private fun play() {
         val ok = ready ?: return
         if (running) return
+        // Prova a leitura antes de acordar o código nativo: sem isso a falha
+        // aparece como "código 1" genérico, que manda o usuário conferir a
+        // pasta — e a pasta estava certa.
+        if (!GameFolder.isReadable(ok.nativePath)) {
+            jogarPendente = true
+            if (!temAcessoAArquivos()) {
+                pedirAcessoAArquivos()
+            } else {
+                jogarPendente = false
+                setStatus(getString(R.string.err_sem_permissao))
+            }
+            return
+        }
         running = true
         binding.buttonPlay.isEnabled = false
 

@@ -42,7 +42,12 @@
     <string name="run_ok">O entrypoint retornou (execução de %1$d s).</string>
     <string name="run_no_gen">Este APK não contém o código do jogo (build app-only): nada foi executado. Use um APK compilado com gen/.</string>
     <string name="run_fault">O jogo parou com falha do guest. Veja port/log.txt e o logcat (tag \"x2wr\").</string>
-    <string name="run_fail">Falha ao iniciar (código %1$d). Confira se a pasta contém Wolvie.exe e binkw32.dll.</string>
+    <string name="run_fail">Falha ao iniciar (código %1$d). Confira se a pasta contém Wolvie.exe e binkw32.dll, e veja port/log.txt na pasta do jogo + o logcat (tag "x2wr").</string>
+
+    <!-- Permissão de armazenamento (Android 11+ exige "Todos os arquivos"
+         para o jogo abrir data.pkr/wavs.pkr/movies por caminho). -->
+    <string name="msg_pedir_acesso">O jogo precisa de acesso aos arquivos para abrir data.pkr, wavs.pkr e a pasta movies. Toque em \"Permitir\" na próxima tela (\"Todos os arquivos\") e volte.</string>
+    <string name="err_sem_permissao">Sem permissão de acesso aos arquivos: o Android não deixa abrir Wolvie.exe por caminho. Conceda \"Acesso a todos os arquivos\" nas configurações do app.</string>
 
     <!-- Avisos -->
     <string name="warn_no_persist">Este provedor não permite acesso permanente à pasta; será preciso escolhê-la novamente depois.</string>
