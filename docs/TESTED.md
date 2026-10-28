@@ -304,7 +304,7 @@ Consequência observada ao executar (`LB_TRACE=1`):
 
 ```
 [trace] x2rw_call(005c3042)   entrypoint
-[trace] x2rw_call(001deeb0)   ← valor de slot de IAT não corrigido
+[trace] x2rw_call(001deeb0)   import resolvido pelo RVA de hint/name
 [trace] x2rw_call(005c40b1)   _heap_init
 [trace] x2rw_call(005d4200)   HeapCreate (import)
 [trace] x2rw_call(005c3f69)
@@ -313,6 +313,13 @@ Consequência observada ao executar (`LB_TRACE=1`):
 [trace] x2rw_call(005c40ae)   ← pop ebx; leave; ret  (epílogo, não é função)
 [falha] code=3 va=005c40ae msg=call para VA não resolvido
 ```
+
+Nota sobre `0x001deeb0`: **não** é lixo. A IAT do jogo não é reescrita no
+carregamento, então `call [slot]` entrega o RVA da estrutura
+`IMAGE_IMPORT_BY_NAME` em `.rdata`; `resolve_va_deep()` mapeia esse RVA de
+volta para o símbolo certo. Por isso a importação é despachada corretamente
+com ou sem `X2RW_PATCH_IAT` (medido nos dois modos) — reescrever a IAT é
+redundante, e o padrão do port (sem reescrever) está correto.
 
 Como corrigir (as três partes precisam mudar juntas, senão uma conserta e a
 outra quebra):

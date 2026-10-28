@@ -27,7 +27,10 @@
         <item name="android:layout_marginTop">8dp</item>
     </style>
 
-    <style name="X2WR.Status">
+    <!-- parent="" e obrigatorio aqui: o AAPT trata "X2WR.Status" como filho
+         implicito de "X2WR" (notacao de ponto) e falha o link com
+         "resource style/X2WR not found". Medido no run 40733271314. -->
+    <style name="X2WR.Status" parent="">
         <item name="android:textSize">14sp</item>
         <item name="android:textColor">#FFE0E0E0</item>
     </style>

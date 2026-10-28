@@ -70,6 +70,11 @@ void x2rw_unsupported(x2rw_ctx *c, uint32_t va, const char *insn) {
 /* ------------------------------------------------------------------ */
 
 #define PAGE_BITS 16
+/* O NDK 27 traz `PAGE_SIZE 4096` em <bits/page_size.h>. O nosso é 64 KiB
+ * (o do espaço de endereços do guest), então descarta o do sistema antes —
+ * sem o #undef o clang emite -Wmacro-redefined e a ordem de inclusão vira
+ * sorte. Ver docs/TESTED.md §2.5. */
+#undef PAGE_SIZE
 #define PAGE_SIZE (1u << PAGE_BITS)              /* 64 KiB */
 #define PAGE_COUNT (1u << (32 - PAGE_BITS))      /* 65536 páginas = 4 GiB */
 

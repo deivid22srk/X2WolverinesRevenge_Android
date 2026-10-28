@@ -79,7 +79,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Acesso ao AssetManager (assets/game/*)                             */
+/* Acesso ao AssetManager (assets/game/...)                           */
 /* ------------------------------------------------------------------ */
 
 /* Obtém o AssetManager da aplicação. Anexa a thread atual se necessário:
@@ -269,7 +269,7 @@ int x2rw_host_init(const char *game_dir, int width, int height) {
  * forte causaria SÍMBOLO DUPLICADO (foi o que aconteceu na integração). */
 __attribute__((weak)) void x2rw_host_register_shims(void) {
     /* STUB CONSCIENTE. O contrato real é este:
-     *   - runtime/shims/*.c define x2rw_import_dispatch(c, va), que o
+     *   - runtime/shims/x2rw_*.c define x2rw_import_dispatch(c, va), que o
      *     runtime chama quando um VA não resolve para função lifted;
      *   - é ali que D3D8/DirectSound/DirectInput/winmm/KERNEL32 viram
      *     implementações reais (dx8vk/Vulkan, SDL2, ...).

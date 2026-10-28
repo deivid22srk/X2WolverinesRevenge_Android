@@ -503,7 +503,12 @@ def lift_insn(insn, out: list[str], stats: dict, rng: dict) -> None:
         if mn in ("shl", "sal"):
             out.append(f"uint32_t {t} = (uint32_t)((({a}) << {cntv}) & {mask}u);")
             out.append(f"x2rw_flags_logic(c, {t});")
-            out.append(f"if ({cntv}) {{ if (((({a}) >> (32 - {cntv})) & 1u)) "
+            # `32 - cnt` chega a 32 quando cnt==0 -> deslocamento >= largura,
+            # que é indefinido em C (-Wshift-count-overflow, medido no CI em
+            # gen/Wolvie_part007.c:28543). Mascarar com 0x1f resolve: para
+            # cnt==0 vira `>> 0`.
+            out.append(f"if ({cntv}) {{ if (((({a}) >> "
+                       f"((32u - {cntv}) & 0x1fu)) & 1u)) "
                        f"c->eflags |= X2RW_CF; }}")
         elif mn == "shr":
             out.append(f"uint32_t {t} = (uint32_t)((({a}) & {mask}u) >> {cntv});")
@@ -511,12 +516,17 @@ def lift_insn(insn, out: list[str], stats: dict, rng: dict) -> None:
         elif mn == "sar":
             out.append(f"uint32_t {t} = (uint32_t)(((int32_t)({a})) >> {cntv});")
             out.append(f"x2rw_flags_logic(c, {t});")
+        # Rotação: a segunda parcela usa `(32 - cnt) & 0x1f`. Sem a máscara,
+        # cnt==0 gera `>> 32` / `<< 32` (indefinido) — era o aviso real
+        # -Wshift-count-overflow do CI. Com a máscara, cnt==0 dá `x | x` = x,
+        # que é o resultado correto de uma rotação por 0.
         elif mn == "rol":
             out.append(f"uint32_t {t} = (uint32_t)(((({a}) << {cntv}) | "
-                       f"(({a}) >> (32 - {cntv}))) & {mask}u);")
+                       f"((({a}) & {mask}u) >> ((32u - {cntv}) & 0x1fu))) "
+                       f"& {mask}u);")
         elif mn == "ror":
-            out.append(f"uint32_t {t} = (uint32_t)(((({a}) >> {cntv}) | "
-                       f"(({a}) << (32 - {cntv}))) & {mask}u);")
+            out.append(f"uint32_t {t} = (uint32_t)(((({a}) & {mask}u) >> {cntv}) | "
+                       f"((({a}) << ((32u - {cntv}) & 0x1fu)) & {mask}u));")
         elif mn in ("rcl", "rcr"):
             out.append(f'x2rw_unsupported(c, {va:#x}u, "{mn}");')
             stats["unsupported"] += 1

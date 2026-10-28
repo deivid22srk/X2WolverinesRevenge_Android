@@ -44,7 +44,7 @@
  * mestra medida (GetMessageA, SetWindowLongA/GWLP_USERDATA, GetAsyncKeyState,
  * GetKeyboardState/MapVirtualKeyA, wsprintfA/CharUpperA, menus, hotkeys,
  * hooks, ExitWindowsEx) não são importadas por Wolvie.exe nem por
- * binkw32.dll (conferido em gen/*_imports.h: 39 nomes de USER32 e 13 de
+ * binkw32.dll (conferido em gen/&lt;mod&gt;_imports.h: 39 nomes de USER32 e 13 de
  * GDI32). O despachante só resolve nomes registrados em x2rw_shims.h, logo
  * implementá-las aqui seria código morto. As 39 funções abaixo são
  * exatamente a superfície importada; a entrada do jogo é o DirectInput8.
