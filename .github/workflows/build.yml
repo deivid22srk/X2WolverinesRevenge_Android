@@ -1,0 +1,397 @@
+# X2: Wolverine's Revenge — port Android (recompilação estática)
+#
+# ESTE É O ÚNICO LUGAR ONDE O APK É CONSTRUÍDO. A regra do projeto é
+# explícita: nunca invocar `gradlew assemble*`, `ndk-build` ou o SDK/NDK
+# localmente. Toda compilação do APK acontece aqui, no GitHub Actions.
+#
+# Estratégia C (ver README.md):
+#   * este repositório é PÚBLICO e contém apenas código do port;
+#   * o código lifted do jogo (gen/) vive no repositório PRIVADO
+#     `GEN_REPO`, porque é DERIVADO DO BINÁRIO DO JOGO;
+#   * o job baixa gen/ usando o segredo GEN_TOKEN;
+#   * sem o segredo (ou num fork), o job cai para "app-only": compila o
+#     aplicativo Android sem o código do jogo. O APK instala e o launcher
+#     valida a pasta do jogo, mas não executa o jogo.
+#
+# Nenhum arquivo do jogo (executável, DLL, dados, vídeo, áudio) é
+# versionado neste repositório nem enviado como artefato.
+
+name: build
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "Tipo de build"
+        type: choice
+        options:
+          - app-only      # só o app Android (sem código do jogo)
+          - full          # app + código lifted de gen/ (requer GEN_TOKEN)
+          - gen-only      # gera gen/ e publica no repositório privado
+        default: app-only
+      gen_tag:
+        description: "Tag/release de gen/ no repositório privado (vazio = última)"
+        type: string
+        default: ""
+      gen_jobs:
+        description: "Partições do código lifted (afeta memória do compilador)"
+        type: string
+        default: "16"
+  push:
+    branches: [main]
+    paths:
+      - "android/**"
+      - "runtime/**"
+      - "tools/**"
+      - "desktop/**"
+      - ".github/workflows/build.yml"
+      - "Makefile"
+  pull_request:
+    branches: [main]
+
+# Só um build por ref; em PR, cancela o anterior.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Versões fixadas — o NDK e o CMake precisam bater com android/app/build.gradle.kts
+  JAVA_VERSION: "17"
+  NDK_VERSION: "27.0.12077973"
+  CMAKE_VERSION: "3.22.1"
+  ANDROID_API: "34"
+  ANDROID_BUILD_TOOLS: "34.0.0"
+  GRADLE_VERSION: "8.7"
+
+jobs:
+  # ------------------------------------------------------------------
+  # 1) Lint barato: valida que nenhum arquivo do jogo entrou no repo e
+  #    que os scripts Python ao menos compilam.
+  # ------------------------------------------------------------------
+  guard:
+    name: "Guarda: nenhum arquivo do jogo no repositório"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Falhar se houver binário/dado do jogo versionado
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Extensões proibidas neste repositório público.
+          bad=$(git ls-files \
+            | grep -Ei '\.(exe|dll|pkr|bik|all|mdl|pso|wav|ogg|mp3|bmp|tga|dds|pak|zip|7z|rar|iso|bin|dat|sav|ini|cfg|log)$' \
+            | grep -v -E '^(ci/gen_stub/|android/app/src/main/cpp/ci_stub/)' || true)
+          if [ -n "$bad" ]; then
+            echo "::error::Arquivos do jogo (ou derivados proibidos) versionados:"
+            echo "$bad"
+            exit 1
+          fi
+          # gen/ é privado, nunca pode aparecer aqui.
+          if git ls-files | grep -qE '(^|/)gen/'; then
+            echo "::error::gen/ foi versionado no repositório público."
+            exit 1
+          fi
+          # Nenhum arquivo grande (> 20 MiB) que não seja documentação.
+          while IFS= read -r f; do
+            sz=$(stat -c%s "$f")
+            if [ "$sz" -gt 20971520 ]; then
+              echo "::error::Arquivo grande demais versionado: $f ($sz bytes)"
+              exit 1
+            fi
+          done < <(git ls-files)
+          echo "OK: repositório limpo."
+
+      - name: Sintaxe dos scripts Python
+        run: |
+          set -euo pipefail
+          python3 -m py_compile tools/*.py
+          echo "OK: tools/*.py compilam."
+
+      - name: Sintaxe do workflow (actionlint)
+        run: |
+          set -euo pipefail
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color .github/workflows/build.yml
+        continue-on-error: true   # ação de lint; não bloqueia a compilação
+
+  # ------------------------------------------------------------------
+  # 2) Build do APK
+  # ------------------------------------------------------------------
+  apk:
+    name: "APK (arm64-v8a)"
+    runs-on: ubuntu-latest
+    needs: guard
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Definir tipo de build
+        id: mode
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "type=${{ inputs.build_type }}" >> "$GITHUB_OUTPUT"
+            echo "gen_jobs=${{ inputs.gen_jobs }}" >> "$GITHUB_OUTPUT"
+            echo "gen_tag=${{ inputs.gen_tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "type=app-only" >> "$GITHUB_OUTPUT"
+            echo "gen_jobs=4" >> "$GITHUB_OUTPUT"
+            echo "gen_tag=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Instalar plataforma, build-tools, NDK e CMake
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-${ANDROID_API}" \
+            "build-tools;${ANDROID_BUILD_TOOLS}" \
+            "ndk;${NDK_VERSION}" \
+            "cmake;${CMAKE_VERSION}"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Ferramentas auxiliares (zstd, python)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zstd python3-pip
+          python3 -m pip install --quiet --break-system-packages pefile capstone || \
+            python3 -m pip install --quiet pefile capstone
+
+      - name: Gradle ${{ env.GRADLE_VERSION }}
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
+          cache-read-only: false
+
+      # ----------------------------------------------------------------
+      # gen/: código lifted do jogo (DERIVADO DO BINÁRIO — nunca público)
+      # ----------------------------------------------------------------
+      - name: Baixar gen/ do repositório privado
+        id: fetch_gen
+        if: steps.mode.outputs.type == 'full'
+        shell: bash
+        env:
+          GEN_TOKEN: ${{ secrets.GEN_TOKEN }}
+          GEN_REPO: ${{ vars.GEN_REPO }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GEN_TOKEN:-}" ] || [ -z "${GEN_REPO:-}" ]; then
+            echo "::warning::GEN_TOKEN ou GEN_REPO ausente — caindo para app-only."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "::add-mask::$GEN_TOKEN"
+          TAG="${{ steps.mode.outputs.gen_tag }}"
+          if [ -z "$TAG" ]; then TAG="gen-latest"; fi
+          url="https://x-access-token:${GEN_TOKEN}@github.com/${GEN_REPO}.git"
+          # O gen/ é grande: clone raso da tag específica e descompacta.
+          mkdir -p /tmp/genrepo
+          if ! git clone --depth 1 --branch "$TAG" "$url" /tmp/genrepo; then
+            echo "::warning::Tag $TAG não encontrada em $GEN_REPO — caindo para app-only."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mkdir -p gen
+          if [ -f /tmp/genrepo/gen.tar.zst ]; then
+            zstd -d -c /tmp/genrepo/gen.tar.zst | tar -x -C .
+          else
+            cp -r /tmp/genrepo/gen/. gen/
+          fi
+          n=$(ls -1 gen/*.c 2>/dev/null | wc -l)
+          echo "gen/: $n arquivos .c"
+          if [ "$n" -eq 0 ]; then
+            echo "::warning::gen/ baixado mas sem .c — app-only."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+          # Limpa credenciais do disco.
+          rm -rf /tmp/genrepo
+
+      # Os stubs ficam versionados em ci/gen_stub/, mas são REGERADOS aqui
+      # para garantir que batem com tools/games.py (ImageBase, tamanho). Um
+      # stub desatualizado compila e instala, e só falha no aparelho — o pior
+      # tipo de erro. Como não dependem do binário do jogo, rodam sempre.
+      - name: Gerar os stubs do build app-only
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/gen_stub.py --game x2wr --out ci/gen_stub/tables
+          ls -1 ci/gen_stub/tables/*.c ci/gen_stub/imports/*.h
+
+      - name: Resumo do modo
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.fetch_gen.outputs.ok }}" = "true" ]; then
+            echo "BUILD_FULL=1" >> "$GITHUB_ENV"
+            echo "Modo: FULL (com código lifted do jogo)"
+          else
+            echo "BUILD_FULL=0" >> "$GITHUB_ENV"
+            echo "Modo: APP-ONLY (sem código lifted do jogo)"
+          fi
+
+      # ----------------------------------------------------------------
+      # Build
+      # ----------------------------------------------------------------
+      - name: Gerar keystore de depuração (assinatura do build de teste)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.android"
+          if [ ! -f "$HOME/.android/debug.keystore" ]; then
+            keytool -genkeypair -v \
+              -keystore "$HOME/.android/debug.keystore" \
+              -storepass android -keypass android \
+              -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Compilar o APK
+        working-directory: android
+        shell: bash
+        env:
+          LB_GEN_JOBS: ${{ steps.mode.outputs.gen_jobs }}
+        run: |
+          set -euo pipefail
+          # LB_GEN_JOBS dimensiona as partições do código lifted, para que o
+          # compilador não estoure memória nos runners de 7 GB.
+          jobs="${LB_GEN_JOBS:-4}"
+          gradle --no-daemon --stacktrace \
+            -Px2wr.ndkVersion="${NDK_VERSION}" \
+            -Px2wr.genJobs="$jobs" \
+            :app:assembleDebug :app:assembleRelease 2>&1 | tee /tmp/gradle.log
+
+      - name: Localizar os APKs
+        id: apk
+        shell: bash
+        run: |
+          set -euo pipefail
+          find android/app/build/outputs/apk -name '*.apk' -print0 \
+            | xargs -0 -r ls -la
+          d=$(find android/app/build/outputs/apk/debug -name '*.apk' | head -1)
+          r=$(find android/app/build/outputs/apk/release -name '*.apk' | head -1)
+          echo "debug=$d" >> "$GITHUB_OUTPUT"
+          echo "release=$r" >> "$GITHUB_OUTPUT"
+          test -n "$d" || { echo "::error::APK debug não foi gerado"; exit 1; }
+
+      - name: Verificar que o APK contém a arm64-v8a
+        shell: bash
+        run: |
+          set -euo pipefail
+          unzip -l "${{ steps.apk.outputs.debug }}" | tee /tmp/apk_list.txt
+          grep -q 'lib/arm64-v8a/' /tmp/apk_list.txt || {
+            echo "::error::O APK não contém bibliotecas arm64-v8a."
+            exit 1
+          }
+
+      - name: Guardar o APK de depuração (público)
+        uses: actions/upload-artifact@v4
+        with:
+          name: x2wr-apk-debug-${{ steps.mode.outputs.type }}-${{ github.run_number }}
+          path: ${{ steps.apk.outputs.debug }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Guardar o APK de release (apenas em build full)
+        if: env.BUILD_FULL == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: x2wr-apk-release-${{ github.run_number }}
+          path: ${{ steps.apk.outputs.release }}
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Registro do Gradle em caso de falha
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-log-${{ github.run_number }}
+          path: |
+            /tmp/gradle.log
+            android/app/build/outputs/logs/
+            android/app/.cxx/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ------------------------------------------------------------------
+  # 3) gen-only: gera o código lifted e publica no repositório PRIVADO
+  #    Roda num runner porque o lifter leva minutos e precisa dos binários
+  #    do jogo, que NÃO estão aqui. Este job só existe para documentar o
+  #    caminho: ele exige que os binários sejam fornecidos por outro meio
+  #    (por exemplo, um release privado), e por isso fica desligado por
+  #    padrão, com falha explícita se faltar entrada.
+  # ------------------------------------------------------------------
+  gen:
+    name: "gen/ (lifted) — requer binários do jogo"
+    if: github.event_name == 'workflow_dispatch' && inputs.build_type == 'gen-only'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Baixar os binários do jogo do release privado
+        shell: bash
+        env:
+          GEN_TOKEN: ${{ secrets.GEN_TOKEN }}
+          GEN_REPO: ${{ vars.GEN_REPO }}
+          GH_TOKEN: ${{ secrets.GEN_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GEN_TOKEN:-}" ] || [ -z "${GEN_REPO:-}" ]; then
+            echo "::error::gen-only exige GEN_TOKEN e GEN_REPO."; exit 1
+          fi
+          echo "::add-mask::$GEN_TOKEN"
+          gh release download binarios --repo "$GEN_REPO" \
+            --pattern 'Wolvie.exe' --pattern 'binkw32.dll' --dir /tmp/bin \
+            --clobber
+          ls -la /tmp/bin
+      - name: Instalar ferramentas
+        run: |
+          python3 -m pip install --quiet --break-system-packages pefile capstone
+      - name: Descobrir e liftar
+        shell: bash
+        run: |
+          set -euo pipefail
+          make gen GAME_BIN_DIR=/tmp/bin
+          mkdir -p gen
+          ZSTD_NB_THREADS=0 tar -cf - gen | zstd -19 -T0 -o gen.tar.zst
+          ls -la gen.tar.zst
+      - name: Publicar em GEN_REPO
+        shell: bash
+        env:
+          GEN_TOKEN: ${{ secrets.GEN_TOKEN }}
+          GEN_REPO: ${{ vars.GEN_REPO }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::$GEN_TOKEN"
+          url="https://x-access-token:${GEN_TOKEN}@github.com/${GEN_REPO}.git"
+          rm -rf /tmp/out && git clone --depth 1 "$url" /tmp/out
+          cp gen.tar.zst /tmp/out/
+          cd /tmp/out
+          git config user.name  "x2wr-ci"
+          git config user.email "x2wr-ci@users.noreply.github.com"
+          git add gen.tar.zst
+          git commit -m "gen/ gerado por CI run ${GITHUB_RUN_NUMBER}" || echo "nada novo"
+          git tag -f gen-latest
+          git push origin HEAD:main
+          git push -f origin gen-latest
+          rm -rf /tmp/out

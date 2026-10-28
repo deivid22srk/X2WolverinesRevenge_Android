@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Todas as strings visíveis ao usuário estão em português do Brasil, como
+  pede o projeto. Os placeholders usam %1$s / %1$d para não dependerem de
+  ordem (o lint do Android também exige o índice explícito).
+-->
+<resources>
+    <string name="app_name">X2: Wolverine\'s Revenge</string>
+
+    <!-- Painel do launcher -->
+    <string name="title_launcher">Port Android — arm64-v8a</string>
+    <string name="label_folder">Pasta do jogo</string>
+    <string name="folder_none">Nenhuma pasta selecionada</string>
+    <string name="folder_value">%1$s</string>
+    <string name="button_pick">ESCOLHER PASTA</string>
+    <string name="button_save">SALVAR</string>
+    <string name="button_play">JOGAR</string>
+
+    <!-- Estado / validação -->
+    <string name="status_pick_folder">Escolha a pasta que contém Wolvie.exe e binkw32.dll.</string>
+    <string name="status_pick_cancelled">Seleção cancelada.</string>
+    <string name="status_validating">Validando a pasta e calculando o SHA-1 de Wolvie.exe…</string>
+    <string name="status_ready">Pasta pronta: %1$s</string>
+    <string name="status_saved">Pasta salva: %1$s</string>
+    <string name="status_running">Executando… o log nativo sai no logcat com a tag \"x2wr\".</string>
+    <string name="status_no_native_path">O provedor escolhido não expõe um caminho de arquivo que o código nativo consiga abrir. Copie a pasta para o armazenamento interno ou escolha a pasta pelo Armazenamento do aparelho.</string>
+    <string name="status_bundled_binaries">Usando Wolvie.exe e binkw32.dll de dentro do APK (data.pkr e wavs.pkr ainda vêm da sua cópia).</string>
+
+    <!-- SHA-1 -->
+    <string name="sha_unavailable">SHA-1 de Wolvie.exe: não foi possível calcular</string>
+    <string name="sha_ok">SHA-1 de Wolvie.exe: %1$s (confere)</string>
+    <string name="sha_mismatch">AVISO: SHA-1 de Wolvie.exe é %1$s, diferente da release verificada (o jogo pode não funcionar corretamente)</string>
+
+    <!-- Assets -->
+    <string name="assets_complete">Containers presentes: %1$s</string>
+    <string name="assets_missing">Containers presentes: %1$s — AUSENTES: %2$s (o jogo abre, mas não carrega conteúdo)</string>
+
+    <!-- Modo do build -->
+    <string name="build_app_only">AVISO: este APK foi compilado SEM o código do jogo (build app-only). O launcher valida a pasta, mas o jogo não pode ser executado.</string>
+
+    <!-- Resultado da execução (códigos de nativeRun) -->
+    <string name="run_ok">O entrypoint retornou (execução de %1$d s).</string>
+    <string name="run_no_gen">Este APK não contém o código do jogo (build app-only): nada foi executado. Use um APK compilado com gen/.</string>
+    <string name="run_fault">O jogo parou com falha do guest. Veja port/log.txt e o logcat (tag \"x2wr\").</string>
+    <string name="run_fail">Falha ao iniciar (código %1$d). Confira se a pasta contém Wolvie.exe e binkw32.dll.</string>
+
+    <!-- Avisos -->
+    <string name="warn_no_persist">Este provedor não permite acesso permanente à pasta; será preciso escolhê-la novamente depois.</string>
+    <string name="toast_saved">Pasta salva.</string>
+
+    <!-- Controles (mapeamento verificado no Wolvie.INI: Punch=75 'K',
+         Kick=72 'H', Jump=57 '9', Action=77 'M', Claws=71 'G',
+         Crouch=82 'R', Stealth=42 PrintScreen, Senses=156 VK_OEM_102,
+         Camera=76 'L'. O direcional envia as setas 37/38/39/40.) -->
+    <string name="controls_help">Controles de toque: PUNHO=K, CHUTE=H, PULO=9, AÇÃO=M, GARRAS=G, FRENTE=R, FURTIVO=PrintScreen, SENTIDOS=VK_OEM_102, CÂMERA=L; o direcional e o analógico enviam as setas. Gamepad físico e áudio ainda não existem neste build.</string>
+</resources>

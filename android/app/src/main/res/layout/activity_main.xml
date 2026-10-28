@@ -1,0 +1,139 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Layout do launcher.
+
+  Estrutura em camadas (FrameLayout), de baixo para cima:
+    1. surfaceView   — superfície de renderização (hoje só informa o
+                       tamanho; a camada D3D8->Vulkan ainda não existe);
+    2. overlayHost   — recebe o TouchOverlay, que é criado em código;
+    3. launcherPanel — a UI do launcher, que some quando o jogo começa.
+
+  splitters.png genérico não é usado: nenhum asset de arte é versionado
+  neste repositório.
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@android:color/black"
+    tools:context=".MainActivity">
+
+    <SurfaceView
+        android:id="@+id/surfaceView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone" />
+
+    <!-- Container do overlay de toque. Fica ACIMA do SurfaceView e é
+         transparente; o fundo preto do root não interfere porque o
+         SurfaceView tem janela própria (Z-order abaixo da janela da View). -->
+    <FrameLayout
+        android:id="@+id/overlayHost"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@android:color/transparent" />
+
+    <ScrollView
+        android:id="@+id/launcherPanel"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#E6000000"
+        android:fillViewport="true"
+        android:padding="16dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingBottom="8dp"
+                android:text="@string/title_launcher"
+                android:textColor="#FFFFFFFF"
+                android:textSize="20sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/textBuildMode"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingBottom="8dp"
+                android:textColor="#FFFFC107"
+                android:textSize="14sp"
+                android:visibility="gone" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/label_folder"
+                android:textColor="#FFB0BEC5"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/textFolder"
+                style="@style/X2WR.Status"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/folder_none"
+                android:textIsSelectable="true" />
+
+            <TextView
+                android:id="@+id/textSha"
+                style="@style/X2WR.Status"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingTop="4dp"
+                android:text="@string/sha_unavailable" />
+
+            <TextView
+                android:id="@+id/textAssets"
+                style="@style/X2WR.Status"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingTop="4dp" />
+
+            <TextView
+                android:id="@+id/textStatus"
+                style="@style/X2WR.Status"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingTop="12dp"
+                android:paddingBottom="12dp"
+                android:text="@string/status_pick_folder" />
+
+            <Button
+                android:id="@+id/buttonPick"
+                style="@style/X2WR.Button"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/button_pick" />
+
+            <Button
+                android:id="@+id/buttonSave"
+                style="@style/X2WR.Button"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:enabled="false"
+                android:text="@string/button_save" />
+
+            <Button
+                android:id="@+id/buttonPlay"
+                style="@style/X2WR.Button"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:enabled="false"
+                android:text="@string/button_play" />
+
+            <TextView
+                style="@style/X2WR.Status"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingTop="16dp"
+                android:text="@string/controls_help"
+                android:textColor="#FF90A4AE"
+                android:textSize="12sp" />
+        </LinearLayout>
+    </ScrollView>
+</FrameLayout>

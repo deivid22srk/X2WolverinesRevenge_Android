@@ -1,0 +1,67 @@
+# --- Regra 0: NADA do jogo, nada do C gerado ---
+# Executáveis/DLLs fornecidos pelo usuário
+*.exe
+*.dll
+*.so
+*.so.*
+
+# Containers de assets do jogo (data.pkr, wavs.pkr, etc.)
+Data/
+*.pkr
+*.bik
+*.xpr
+*.all
+*.mdl
+*.pso
+
+# Análise gerada pelo discovery/lifter
+analysis/
+*.capstone
+*.lifter.*
+
+# Código C gerado a partir do jogo (derivado, não redistribuível)
+gen/
+
+# Python
+__pycache__/
+*.pyc
+
+# Builds
+build/
+*.o
+*.obj
+*.a
+*.lib
+
+# Gradle
+.gradle/
+# Não ignorar o wrapper do Gradle: android/gradle/wrapper é necessário
+gradle/
+!android/gradle/
+!android/gradle/**
+local.properties
+.settings/
+.project
+.classpath
+
+# Android Studio
+iml/
+*.iml
+.idea/
+*.hprof
+
+# Logs do jogo/port (criados em tempo de execução)
+port/
+port.log
+LB_*.log
+d3d.log
+Wolvie.ini
+
+# KEYS (não versionar - use GitHub Secrets)
+*.jks
+*.keystore
+keytool_*.jks
+
+# OS
+.DS_Store
+Thumbs.db
