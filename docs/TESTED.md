@@ -5,12 +5,21 @@
 > escrito que não foi. Quando um número aparece, ele foi medido nesta
 > máquina, com o comando indicado.
 
-Máquina de desenvolvimento: Linux x86-64, sem compilador C instalado
-(`gcc`/`cc`/`clang` ausentes) e sem acesso de superusuário para instalá-lo.
-**Consequência honesta: nenhum código C deste repositório foi compilado
-localmente.** A primeira compilação de verdade acontece no GitHub Actions
-(`.github/workflows/build.yml`). Toda afirmação sobre "compila" ou "linka"
-está, por isso, marcada como não verificada.
+Máquina de desenvolvimento: Linux **aarch64**, 8 núcleos, ~1 GB de RAM livre.
+Existe um compilador C real disponível: `zig cc` 0.13.0 (clang 18.1.6),
+usado com `-target aarch64-linux-musl` — os binários rodam nativos nesta
+máquina.
+
+**Correção de registro:** uma versão anterior deste arquivo dizia que nada
+tinha sido compilado localmente. Isso deixou de ser verdade: runtime, shims e
+todo o `gen/` são compilados aqui e executados no harness `desktop/`
+(`x2wr_desktop`), que é o oráculo usado para depurar. O que **nunca** é
+compilado aqui é o APK: APK só sai do `build.yml`, por regra do projeto.
+
+Desde a rodada em que o `build.yml` ganhou o job `desktop`, a compilação
+pesada (1,2 milhão de instruções liftadas) também pode rodar no runner e sair
+como artefato; o runner **não executa** o jogo, porque os arquivos do jogo não
+podem entrar no repositório.
 
 ---
 
@@ -569,6 +578,124 @@ confirma que o harness de desktop é um oráculo válido para o aparelho.
    **muda o resultado** de qualquer código que dependa do erro da
    aproximação. Documentado em `runtime/x2rw_simd.c`.
 5. Um build completo cabe no tempo do runner — **não medido**.
+
+---
+
+### 2.12 CORRIGIDO: argumentos de import deslocados + 26 mil alvos falsos
+
+Quatro defeitos medidos, todos com sintoma visível no harness:
+
+**(a) `x2rw_call` despachava import ANTES de empilhar a sentinela.** O leitor de
+argumentos (`esp+4+4*i`) e o desconto de `4*(nargs+1)` pressupõem o endereço de
+retorno na pilha. Medido com o log de imports (`LB_TRACE=1`):
+
+```
+HeapCreate(00001000, 00000000, fffffff0)   <- correto: (0, 0x1000, 0)
+InitializeCriticalSection(fffffff0)        <- recebeu a SENTINELA
+```
+
+Todo import chamado por `call [IAT]` recebia argumentos deslocados. Depois da
+correção: `HeapCreate(0, 0x1000, 0)`, `HeapAlloc(00a00000, 8, 0x80)`,
+`TlsSetValue(0, 20000010)`.
+
+**(b) Salto indireto para fora da função era tratado como erro.** Medido:
+`jmp dword ptr [0x5d4144]` em `0x5cccf2` salta para `GetACP`. É salto de cauda.
+Agora cai em `x2rw_tail()`.
+
+**(c) A descoberta marcava alvo de `call` FALSO dentro do corpo de uma função.**
+A varredura linear ressincroniza byte a byte e decodifica `call rel32` em região
+de dados. Medido: `0x5ccb2b` (`push ebp; mov ebp,esp; sub esp,0x18`) com alvo
+falso em `0x5ccb52` (`xor esi,esi`, corpo de um `if`), 39 bytes adiante. Como o
+tamanho da função era a distância até o próximo início, a função real era
+**partida** e a segunda metade liftada a partir do meio. Corrigido: alvo sem
+prólogo que cai dentro do corpo de outra função é descartado (263 no Wolvie,
+11 na binkw32).
+
+**(d) O fechamento de saltos de cauda criava entrada em QUALQUER alvo.** Medido:
+`0x5c8cf3` cai no MEIO do `call _alloca_probe` (`0x5c8cf2`, 5 bytes). O corpo
+gerado era lixo; o lixo continha outro salto de cauda, que virava outra entrada,
+que gerava outro salto — o programa entrava em ciclo e estourava a pilha
+(`esp` chegou a `0x00010000`, o fundo da pilha). Agora o alvo só vira entrada se
+uma decodificação **alinhada**, partindo do início da função que o contém,
+topar com ele como início de instrução.
+
+Resultado medido em (d): 26.953 alvos falsos descartados no Wolvie, 6.143
+entradas legítimas mantidas. Instruções caíram de 1.259.953 para 978.612 e a
+**cobertura subiu** de 99,54 % para 99,76 % — ou seja, a maior parte do que
+estava sendo liftado era lixo.
+
+Duas tentativas de regra foram medidas e **descartadas** (registro honesto):
+
+- Exigir que o alvo terminasse em `ret`/`jmp` em até 32 bytes: recusava alvo de
+  desvio legítimo no meio da função (medido: `0x5c3371`, dentro de `0x5c3368`).
+- Parar a decodificação no primeiro terminador: recusava epílogo compartilhado,
+  que vive logo depois de um `ret` (medido: `0x5c410a` é `push 1; pop eax; ret`,
+  precedido por um `ret` em `0x5c4109`).
+
+**(e) O lifter não apagava as partições antigas.** O número de partes muda a
+cada regeração (32 arquivos numa execução, 24 na seguinte). Partição velha
+esquecida no diretório é recompilada — o build pega `gen/*.c` — e o link falha
+com `duplicate symbol` (medido: `x2rw_binkw32_d6c0` em `binkw32_part023.c` e
+`binkw32_part024.c`). Pior que falhar: uma partição velha com a **mesma** função
+mas código de antes ligaria em silêncio e rodaria código errado.
+
+**(f) Harness de diagnóstico no CI.** Job `desktop` do `build.yml`: baixa `gen/`
+do repositório privado, compila em paralelo com `zig cc`, publica
+`x2wr-desktop-aarch64`. Executado com sucesso no run 40872543379.
+
+### 2.13 ONDE A EXECUÇÃO PARA AGORA (honesto)
+
+O harness chega ao seguinte, nesta ordem, e para:
+
+```
+módulos registrados: 22660 + 827 funções
+HeapCreate(0, 0x1000, 0)   InitializeCriticalSection x4   TlsAlloc
+TlsSetValue(0, 20000010)   HeapAlloc(00a00000, 8, 0x80)
+GetCommandLineA   GetEnvironmentStringsW   GetACP   GetCPInfo(1252)
+GetStringTypeA/W  LCMapStringW  MultiByteToWideChar  GetCurrentThreadId
+GetStartupInfoA
+FAULT code=3 va=0x005cbf2c msg=salto de cauda para VA não resolvido
+estado: esp=003ffee8 ebp=003fff3c eip_pc=005cbe3a
+```
+
+`0x5cbf2c` cai **dentro** de `lea esi,[ecx+eax*4]` (que começa em `0x5cbf2b`):
+é alvo falso de um **salto indireto calculado**, não um stub faltando. `esp` e
+`ebp` estão alinhados — não há mais corrupção de pilha; agora é valor.
+
+Ou seja: a inicialização do CRT vai longe (heap, TLS, seções críticas, ambiente,
+tabelas de ctype/locale), mas **o jogo ainda NÃO chega ao menu principal**, e a
+camada gráfica ainda não foi exercitada nem uma vez.
+
+### 2.14 Superfície Direct3D 8 REALMENTE usada (medido no binário)
+
+Varredura de `call [reg+disp32]` no `.text` de `Wolvie.exe`, casando o
+deslocamento com a vtable de `IDirect3DDevice8`:
+
+| Slot | Método | Chamadas |
+|---|---|---|
+| 63 | `SetTextureStageState` | 106 |
+| 51 | `GetRenderState` | 76 |
+| 50 | `SetRenderState` | 73 |
+| 37 | `SetTransform` | 7 |
+| 72 | `DrawPrimitiveUP` | 7 |
+| 42 | `SetMaterial` | 4 |
+| 46 | `LightEnable` | 3 |
+| 61 | `SetTexture` | 3 |
+| 70 | `DrawPrimitive` | 3 |
+| 83 | `SetStreamSource` | 3 |
+| 34/35 | `BeginScene` / `EndScene` | 2 / 7 |
+| 36 | `Clear` | 2 |
+
+**Limite honesto desta medição:** ela só enxerga chamadas *diretas* pela vtable
+(`call [reg+disp32]`). O jogo pode carregar o ponteiro do método num registrador
+antes de chamar (`mov edx,[eax+0x3C]; call edx`), o que esta varredura NÃO vê —
+por isso `Present` não aparece na tabela. É um **piso**, não a lista completa. A
+lista completa só sai por instrumentação em tempo de execução, quando o jogo
+criar o device.
+
+O que a tabela já sustenta: é um jogo de **pipeline fixo** (fixed-function), com
+uso intenso de render states e texture stage states; os shaders aparecem, mas
+pouco (`CreateVertexShader`/`CreatePixelShader` com poucas chamadas).
 
 ---
 

@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import json
 import bisect
+import glob
 import os
 import re
 import sys
@@ -1551,6 +1552,20 @@ def lift_module(mod_path: str, m: Module, funcs_json: str, out_dir: str,
             acc = 0
         parts[-1].append(item)
         acc += len(item[2])
+
+    # APAGA as partições antigas antes de escrever.
+    #
+    # BUG MEDIDO: o número de partes muda a cada regeração (32 arquivos numa
+    # execução, 26 na seguinte). Partição velha esquecida no diretório é
+    # compilada de novo — o build pega gen/*.c — e o link falha com
+    # "duplicate symbol" (medido: x2rw_binkw32_d6c0 em binkw32_part023.c e
+    # binkw32_part024.c). Pior que falhar: uma partição velha com a MESMA
+    # função mas código de antes liga em silêncio e roda código errado.
+    for velho in glob.glob(os.path.join(out_dir, f"{m.name}_part*.c")):
+        try:
+            os.remove(velho)
+        except OSError:
+            pass
 
     table_entries: list[tuple[int, str]] = []
     written: list[str] = []
