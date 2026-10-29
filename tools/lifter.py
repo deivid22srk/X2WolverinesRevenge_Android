@@ -1372,15 +1372,19 @@ def lift_function(md, m: Module, func: dict, image: bytes, stats: dict,
             for a in all_addrs:
                 dispatch.append(f"    case {a:#x}u: goto L_{a:x};")
             dispatch.append("    default:")
-            dispatch.append("        x2rw_unsupported(c, c->jump_target, "
-                            '"salto indireto fora da função");')
+            # Salto indireto para FORA da função é salto de cauda, não erro:
+            # o caso medido é `jmp dword ptr [0x5d4144]` (0x5cccf2) saltando
+            # para um thunk de import. x2rw_tail() resolve tanto função
+            # liftada quanto import, sem empilhar nada — que é o que o jmp
+            # faz. Antes isto era "salto indireto fora da função" e matava a
+            # execução no meio do CRT.
+            dispatch.append("        x2rw_tail(c, c->jump_target);")
             dispatch.append("        return;")
             dispatch.append("    }")
         else:
             dispatch.append(f"    /* função com {len(all_addrs)} instruções: "
                             "dispatch grande demais */")
-            dispatch.append("    x2rw_unsupported(c, c->jump_target, "
-                            '"função grande demais para dispatch");')
+            dispatch.append("    x2rw_tail(c, c->jump_target);")
             dispatch.append("    return;")
 
     lines = [f"/* {func['name']}  VA={va:#010x} size={size} "
@@ -1391,6 +1395,46 @@ def lift_function(md, m: Module, func: dict, image: bytes, stats: dict,
     lines.extend("    " + l for l in dispatch)
     lines.append("}")
     return name, "\n".join(lines)
+
+
+def _fronteira_valida(md, image, cont: dict, target: int) -> bool:
+    """O alvo é início de INSTRUÇÃO dentro da função que o contém?
+
+    Por que isto existe: o fechamento de saltos de cauda criava uma entrada
+    nova para QUALQUER alvo, inclusive alvo falso vindo de decodificação
+    desalinhada. Medido neste binário: 0x5c8cf3 cai no MEIO do `call
+    _alloca_probe` (0x5c8cf2, 5 bytes). Como aquele endereço não é início de
+    instrução, o corpo gerado era lixo — e o lixo continha um salto de cauda
+    para 0x5c8c7f, que também virava entrada, que gerava outro salto... o
+    programa entrava em ciclo e estourava a pilha (esp chegava a 0x00010000).
+
+    Aqui o alvo só é aceito se uma decodificação ALINHADA, partindo do início
+    da função que o contém, topar com ele como início de instrução. A
+    decodificação NÃO para no primeiro terminador: epílogo compartilhado e
+    fragmentos `return N;` vivem justamente logo depois de um `ret` (medido:
+    0x5c410a é `push 1; pop eax; ret`, precedido por um `ret` em 0x5c4109).
+
+    Uma primeira versão exigia também terminar em `ret`/`jmp` em até 32 bytes.
+    Estava errada: alvo de desvio no meio da função (0x5c3371, dentro de
+    0x5c3368) é fronteira válida e não termina tão cedo — a regra recusava
+    alvo legítimo e o programa parava antes do CRT terminar de subir.
+    """
+    base = cont["va"]
+    if base < _IMG_LO:
+        return False
+    fim = base + cont["size"]
+    addr = base
+    achou = False
+    while addr < fim:
+        off = addr - _IMG_LO
+        it = next(md.disasm(image[off:off + 16], addr), None)
+        if it is None:
+            break                       # byte inválido: alinhamento perdido
+        if it.address == target:
+            achou = True
+            break
+        addr = it.address + it.size
+    return achou
 
 
 def lift_module(mod_path: str, m: Module, funcs_json: str, out_dir: str,
@@ -1445,6 +1489,9 @@ def lift_module(mod_path: str, m: Module, funcs_json: str, out_dir: str,
     # 4 bytes — o que produzia um `call` para endereço inválido no aparelho.
     novos = sorted(t for t in stats["tail_targets"] if t not in vistos)
     extra = 0
+    descartados = 0
+    _CONT = sorted(funcs, key=lambda f: f.get("va", 0))
+    _CONT_VA = [f.get("va", 0) for f in _CONT]
     for rodada in range(8):
         if not novos:
             break
@@ -1455,6 +1502,19 @@ def lift_module(mod_path: str, m: Module, funcs_json: str, out_dir: str,
             base = m.imagebase
             rva_t = tgt - base
             if rva_t < 0 or rva_t >= len(image):
+                continue
+            # Alvo falso (meio de instrução) não vira entrada — ver
+            # _fronteira_valida: era assim que o fechamento entrava em ciclo.
+            _i = bisect.bisect_right(_CONT_VA, tgt) - 1
+            if _i < 0:
+                descartados += 1
+                continue
+            _cont = _CONT[_i]
+            if tgt >= _cont["va"] + _cont["size"]:
+                descartados += 1
+                continue
+            if not _fronteira_valida(md, image, _cont, tgt):
+                descartados += 1
                 continue
             # Janela CURTA de propósito: alvo de salto de cauda fora da
             # faixa é, na prática, epílogo compartilhado do MSVC
@@ -1472,8 +1532,9 @@ def lift_module(mod_path: str, m: Module, funcs_json: str, out_dir: str,
         novos = sorted(t for t in stats["tail_targets"] if t not in vistos)
         if len(vistos) == antes:
             break
-    if extra:
-        print(f"[lifter] {m.name}: +{extra} entradas de epílogo/salto de cauda")
+    if extra or descartados:
+        print(f"[lifter] {m.name}: +{extra} entradas de epílogo/salto de cauda"
+              f" ({descartados} alvo(s) falso(s) descartado(s))")
     stats["tail_stubs"] = extra
 
     total_chars = sum(len(src) for _, _, src in lifted) or 1

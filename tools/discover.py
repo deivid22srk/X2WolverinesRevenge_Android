@@ -201,6 +201,52 @@ def discover_module(path: str, m: Module, lift: bool = False) -> dict:
                 continue
         limpos.append(rva)
 
+    # ---- descarta "alvo de call" que cai DENTRO do corpo de outra função ----
+    #
+    # BUG MEDIDO: a varredura linear ressincroniza byte a byte, então em
+    # regiões de dados/desalinhadas ela decodifica um `call rel32` falso. Se o
+    # destino calhar de ser um endereço válido no meio de uma função, ele
+    # entrava na tabela como início de função e PARTIA a função real em duas.
+    # Consequência no código liftado: a segunda metade era traduzida a partir
+    # do meio, gerando instruções desalinhadas (medido: pc=0x5ccb79 dentro de
+    # `lea eax,[ebp-0x18]`, que começa em 0x5ccb77) e um `call` para endereço
+    # inválido.
+    #
+    # Caso concreto: 0x5ccb2b (`push ebp; mov ebp,esp; sub esp,0x18`), 39
+    # bytes, prólogo + alvo de call; e 0x5ccb52 (`xor esi,esi`, corpo de um
+    # `if`) marcado só como alvo de call. O segundo não é início de nada.
+    #
+    # Regra: decodifica para frente a partir de cada início ANCORADO por
+    # prólogo; se um candidato sem prólogo aparece ANTES do primeiro
+    # terminador (ret/jmp), ele está no meio do corpo -> não é função.
+    ancorados = sorted(r for r in limpos if funcs[r] & flags["PROLOGUE"])
+    forte_ancora = (flags["ENTRY"] | flags["EXPORT"] | flags["IAT_THUNK"]
+                    | flags["PROLOGUE"])
+    suspeitos = set()
+    for p_rva in ancorados:
+        off = p_rva
+        while off < text_end:
+            it = next(md.disasm(code[off - text_start:off - text_start + 16],
+                                m.imagebase + off), None)
+            if it is None:
+                break
+            a = it.address - m.imagebase
+            if a != p_rva and a in funcs and a in limpos:
+                if funcs[a] & forte_ancora:
+                    break                      # nova função de verdade
+                suspeitos.add(a)               # candidato dentro do corpo
+            if it.mnemonic in ("ret", "retf") or it.mnemonic.startswith("ret"):
+                break                          # fim do corpo
+            if it.mnemonic == "jmp":
+                break
+            off = it.address - m.imagebase + it.size
+            if off - p_rva > 0x2000:
+                break
+    if suspeitos:
+        print(f"  {len(suspeitos)} alvo(s) de call dentro de corpo de função "
+              f"descartado(s)")
+        limpos = [r for r in limpos if r not in suspeitos]
+
     # ---- monta a tabela final com tamanhos ----
     rvas = limpos
     out_funcs = []
